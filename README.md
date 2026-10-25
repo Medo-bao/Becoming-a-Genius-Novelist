@@ -1,6 +1,6 @@
 # 我要成为天才小说作家
 
-版本1.0.0。自动诊断小说制作状况，在一个主会话中派六岗位子代理持续完成原创/改编的规划、写作、复审、返修与交付。队长只编排与收集，正文由文笔子代理创作，减少作者逐章主动对话。
+自动诊断小说制作状况，在一个主会话中派六岗位子代理持续完成原创/改编的规划、写作、复审、返修与交付。队长只编排与收集，正文由文笔子代理创作，减少作者逐章主动对话。
 
 ## 使用
 
@@ -10,7 +10,7 @@
 node bin/install.mjs --target codex --dir "E:\小说\新书"
 ```
 
-源码仓库：[Medo-bao/-](https://github.com/Medo-bao/-)。下载发行包并解压，或使用 Git：
+源码仓库：[Medo-bao/-](https://github.com/Medo-bao/Becoming-a-Genius-Novelist)。下载发行包并解压，或使用 Git：
 
 ```powershell
 git clone https://github.com/Medo-bao/-.git tiancai-novel
