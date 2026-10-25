@@ -1,0 +1,44 @@
+{
+  "name": "@firefly-harness/dsh-tiancai-novel",
+  "version": "1.0.0",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Medo-bao/-.git"
+  },
+  "homepage": "https://github.com/Medo-bao/-#readme",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/workshop.test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "description": "自动诊断小说制作状况，单会话持续原创或改编、复审修复与 TXT/Word/EPUB 交付。",
+  "exports": {
+    "./hooks": "./adapters/dsh/hooks.js",
+    "./locale/*.json": "./adapters/dsh/locale/*.json",
+    "./icon": "./adapters/dsh/icon.svg"
+  },
+  "files": [
+    "adapters/dsh/cordis.patch.yml",
+    "adapters/dsh/hooks.js",
+    "adapters/dsh/locale/*.json",
+    "adapters/dsh/icon.svg",
+    "core",
+    "skills",
+    "bin",
+    "adapters/codex",
+    "adapters/zcode",
+    "docs"
+  ],
+  "bin": {
+    "novel": "./bin/novel.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./adapters/dsh/cordis.patch.yml"
+    }
+  },
+  "license": "MIT"
+}

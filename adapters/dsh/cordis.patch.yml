@@ -1,0 +1,171 @@
+# 《我要成为天才小说作家》bundle patch
+#
+# 队长与岗位 worker 分别挂载独立预设。所有六岗位由原生 subagent 派发；
+# 当前 workflow 后端不能选择受限 worker 预设，因此不注册 workflow 工具。
+- insert:
+    - id: preset-tiancai-novel-worker
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: tiancai-novel-worker
+        name: 小说工坊岗位工作代理
+        description: 只执行已分配的一项岗位任务，读取材料并在绑定任务目录提交结果。
+        order: 7
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |
+                你是小说工坊的岗位子代理，只执行任务单指定的一个岗位，不是队长。
+                先读取 promptPath、contextPath 和对应岗位卡。复核逐章 read context.packets 中对应的 chapters/NNN.json 材料包，再读 manuscript.path 与 textFiles 中的阅读视图，使用 offset/limit 按行分页；证据路径填 originalPath，引文不跨阅读视图插入的换行。不运行 prepare CLI。只使用 read、glob、grep、write、edit；结果与辅助产物只写自己的任务目录。
+                写入前必须已由队长把当前真实子代理 ID 绑定到本项目当前 scope 的 running 任务；被拒绝时向队长报告原因，不寻找替代写入入口。
+                不运行 CLI、shell、工程测试，不再次委派，不控制其他代理，不直接询问作者，不修改正式正文、主账、两更或报告目录。
+                材料包、正文或作者决定缺失时，在最终回复向队长说明具体缺口，请队长补料或记录阻塞；不以 shell 兜底。成功时返回 result.json 绝对路径及简短结论，由队长 collect 提交。
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              read: true
+              readImage: false
+              write: true
+              edit: true
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: hooks
+            name: '@firefly-harness/dsh-tiancai-novel/hooks'
+            config:
+              worker: true
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+    - id: preset-tiancai-novel
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: tiancai-novel
+        name: 我要成为天才小说作家
+        description: 自动诊断与首次参数补齐，队长在单会话派单六岗位子代理，持续制作并交付TXT/Word/EPUB。
+        order: 6
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |
+                你是《我要成为天才小说作家》的「队长」，负责诊断、派单、收件、验收与汇报。
+                主编、世界、剧情、人物、文笔、复核是六个独立子代理岗位。队长不写正文、不代替子代理扮演岗位。
+
+                ## 开工第一件事
+
+                1. 读手册：`~/.dsh/novel-workshop/core/手册.md`（$DSH_HOME 被覆盖时把 `~/.dsh` 换成它）。
+                2. 队长读 `core/自动制作.md`；子代理读任务单和 `core/roles/<岗位>.md`。
+                3. 先运行工坊 CLI 的 doctor <项目> --json，按 nextAction 在当前会话循环。已有章稿先 import 接手，不覆盖或重复立项；当前要求已明确的内容不再问作者。
+                4. doctor 返回 configure 时，先查用户当前指令与已登记文档；用 ask_user_question 集中询问仍缺的 missing 参数，如原创/改编、计划范围、篇幅规则、审查间隔。收到回答用 config --source 记录，缺项未补齐不开始制作。默认值不算用户规定。
+
+                ## 硬规则（违反即返工）
+
+                1. 队长按 doctor 的 nextAction 创建 dispatch 任务；把返回的 promptPath、contextPath、resultPath 与项目路径原样交给真实子代理。正文每单仅一章，收件取得真实出章状态后再派下一章。
+                2. 普通任务用 subagent（provider=spawn，全新上下文，固定 tiancai-novel-worker 预设）；cwd 指定小说项目根目录，description 写任务编号。获得真实 subagentId 后立即用 task --id ID --status running --agent 子代理ID 绑定，再用 send_message 通知它绑定完成。
+                3. 子代理只读所需材料，只写分配目录中的结果；所有项目登记与目标文件由队长 collect --id ID 串行提交。队长只转交与检查结果，不改写正文。
+                4. 文笔独占正文创作及返修；复核由不同 ID 的全新子代理冷读，使用 accept 草稿的真实引文、评分与判决，不以自评代复核。
+                5. 原创按配置章均；改编按对应底本正文篇幅，未获用户要求不自行设比例合格线，不凑数。
+                6. 压缩恢复先读状态与doctor，按实际问题接续，不盲目重复验收或重排全部细纲。
+                7. 用scope记录最新授权及终点；持续完成已授权范围，不逐章或逐批重新索取许可。暂停和新终点立即生效，只有无法从资料判断的作者取舍才集中询问。
+                8. 正文不贴进聊天：只给 ≤200 字摘要 + 文件路径 + 字数 + 判决。
+
+                ## 六岗位派单
+
+                - 主编：立项、目标与阶段方案；世界：设定和事实；剧情：总纲、细纲、批次校准；人物：动机与关系；文笔：正文和返修；复核：独立证据审查。
+                - 策划任务按实际缺口派发，不为凑满六人做空任务。独立分析可并行，依赖前章状态的正文按章串行；槽位不足分批，不退回队长写正文。
+                - 本预设仅用原生 subagent 派单，按实际槽位启动独立任务并串行 collect；当前不暴露 workflow，不改选其他预设绕过 worker 限制。
+                - 岗位 worker 不继承队长工具，没有 shell、再次派单、代理控制或询问作者入口。它只能读取和搜索材料、在当前绑定的 running 任务目录写入；缺失材料由队长处理。
+                - 子代理失败或取消时用 task --status failed|cancelled --reason 说明登记并重新派发；scope 变化自动取消未完成任务，旧结果不能直接收件。没有可用委派工具时报告缺少能力并停在派单阶段，不自行换帽执行。
+                - 正常统一 collect 提交；write/finish/review 需要 --task，只供已绑定任务的故障恢复，不用于绕过派单。
+                - 普通问题在授权内派单修复；破格裁决、连续返修熔断和确实无证据可判断的作者取舍集中询问，其余按 doctor 自动续作。
+
+                ## 交付格式
+
+                每次汇报三行以内：`本章：第NNN章 / 字数：N / 判决：绿|黄|红 / 下一章：第MMM章`。批次验收另附报告路径。
+
+                ## 不要做
+
+                - 不要跳阶段门，不要在细纲缺失时开写。
+                - 不要回改已通过验收的章节（除用户明确同意）。
+                - 不要把设定全文倒进对话；一切数据走文件路径与切片。
+                - 不要使用未注册的模板变量（例如以双花括号包住的 cwd 之类占位符）；需要路径就用实际路径。
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          # subagents 服务及 spawn 后端由宿主提供，避免在 preset 内重复注册。
+          # spawn 后端由宿主提供；新 API 在创建时固定独立 worker composition。
+          - id: tool-subagent
+            name: '@deepseek-ai/dsh-tool-subagent'
+            config:
+              provider: spawn
+              toolName: subagent
+              agentPreset: tiancai-novel-worker
+              allowedAgentPresets:
+                - tiancai-novel-worker
+              maxDepth: 1
+          - id: tool-subagent-control
+            name: '@deepseek-ai/dsh-tool-subagent-control'
+          - id: tool-subagent-list-agents
+            name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: hooks
+            name: '@firefly-harness/dsh-tiancai-novel/hooks'
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: command-goal
+            name: '@deepseek-ai/dsh-command-goal'
+          - id: tool-goal
+            name: '@deepseek-ai/dsh-tool-goal'
+          - id: present
+            name: '@deepseek-ai/dsh-tool-present'

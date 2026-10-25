@@ -1,0 +1,5 @@
+node_modules/
+.novel-workshop/
+.agents/
+dist/
+*.tgz
