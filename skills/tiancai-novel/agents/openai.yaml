@@ -1,0 +1,6 @@
+interface:
+  display_name: "我要成为天才小说作家"
+  short_description: "仅明确调用后诊断小说项目，由六岗位子代理持续制作与交付成书"
+  default_prompt: "使用 $tiancai-novel，检查当前小说项目并按我的明确目标持续制作。"
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,15 @@
+{
+  "name": "tiancai-novel",
+  "version": "1.0.1",
+  "description": "仅在明确调用本插件后，由六岗位子代理诊断、制作、复核并交付小说。普通写小说请求不自动触发。",
+  "author": { "name": "Medo-bao" },
+  "license": "MIT",
+  "skills": "./adapters/codex/skills/",
+  "interface": {
+    "displayName": "我要成为天才小说作家",
+    "shortDescription": "仅明确调用后启动的六岗位小说制作工坊",
+    "developerName": "Medo-bao",
+    "category": "Productivity",
+    "defaultPrompt": ["使用 $tiancai-novel，检查当前小说项目并按我的目标持续制作。"]
+  }
+}

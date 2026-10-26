@@ -1,0 +1,12 @@
+{
+  "name": "tiancai-novel-local",
+  "interface": { "displayName": "天才小说作家 · 本地" },
+  "plugins": [
+    {
+      "name": "tiancai-novel",
+      "source": { "source": "local", "path": "./" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_USE" },
+      "category": "Productivity"
+    }
+  ]
+}

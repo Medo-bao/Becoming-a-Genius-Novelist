@@ -1,4 +1,6 @@
 interface:
   display_name: "我要成为天才小说作家"
-  short_description: "自动诊断与首次参数补齐，由六岗位子代理持续制作并交付成书"
+  short_description: "仅明确调用后诊断小说项目，由六岗位子代理持续制作与交付成书"
   default_prompt: "使用 $tiancai-novel，先检查已有参数与制作状况；缺项集中询问，队长通过子代理派六岗位完成授权内的制作、复审和修复，正文只由文笔子代理创作。"
+policy:
+  allow_implicit_invocation: false

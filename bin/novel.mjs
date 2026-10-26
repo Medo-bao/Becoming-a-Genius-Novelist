@@ -1,11 +1,13 @@
 #!/usr/bin/env node
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { mkdir, readFile, writeFile, readdir, copyFile } from 'node:fs/promises'
 import { resolve, dirname, join, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as P from './project.mjs'
 import * as W from './production.mjs'
 import * as T from './tasks.mjs'
+import * as D from './documents.mjs'
+import * as A from './archive.mjs'
 import { bookFormats } from './book-formats.mjs'
 import { safePath, managedPath } from './paths.mjs'
 
@@ -22,7 +24,7 @@ function args(argv) {
   return { positional, flags }
 }
 function output(value, json = true) { console.log(json ? JSON.stringify(value, null, 2) : value) }
-const readPayload = flags => typeof flags.source === 'string' ? P.jsonFile(resolve(flags.source)) : Promise.reject(new Error('需要 --source <JSON文件>'))
+const readPayloadFile = flags => typeof flags.source === 'string' ? P.jsonFile(resolve(flags.source)) : Promise.reject(new Error('需要 --source <JSON文件>'))
 function formatList(value = 'all') {
   const list = [...new Set((Array.isArray(value) ? value : String(value).split(',')).map(v => v.trim().toLowerCase()).map(v => v === 'word' ? 'docx' : v))]
   if (list.some(v => !['all', 'md', 'txt', 'docx', 'epub'].includes(v))) throw new Error('format 支持 all、md、txt、docx、word、epub 或逗号组合')
@@ -66,12 +68,12 @@ async function initialize(root, flags) {
 }
 async function adopt(root, flags) {
   if (existsSync(P.local(root, P.MANIFEST))) throw new Error('项目已登记；用 doctor --fix 接续，禁止重复导入重置状态')
-  const found = await P.discover(root), selected = flags.body ?? found.candidates[0]?.body
-  if (!selected) throw new Error('未找到章稿目录，请指定 --body')
+  const found = await P.discover(root), selected = flags.body ?? found.candidates[0]?.body ?? (found.hasPlanningDocuments ? '09-正文' : null)
+  if (!selected) throw new Error('未找到章稿或可复用规划文档，请指定已有项目目录')
   const rows = await P.scan(root, selected)
-  if (!rows.length) throw new Error('章稿目录为空')
+  if (!rows.length && !found.hasPlanningDocuments) throw new Error('章稿目录为空，且未发现可复用规划文档')
   const legacy = found.legacy
-  const start = P.integer(flags.start ?? rows[0].chapter), end = P.integer(flags.end ?? (legacy?.totalPositions ? start + legacy.totalPositions - 1 : rows.at(-1).chapter))
+  const start = P.integer(flags.start ?? rows[0]?.chapter ?? 1), end = P.integer(flags.end ?? (legacy?.totalPositions ? start + legacy.totalPositions - 1 : rows.at(-1)?.chapter ?? start + 119))
   const project = P.templateProject(root, { title: flags.title, mode: flags.mode === '原创' ? '原创' : '改编精修', start, end, words: flags.words, interval: flags.interval ?? legacy?.reviewInterval ?? 5 })
   if (flags.mode !== undefined && !['原创', '改编', '改编精修'].includes(flags.mode)) throw new Error('mode 只能为原创或改编精修')
   const explicit = []
@@ -95,13 +97,15 @@ async function adopt(root, flags) {
   await P.registerFiles(root, project)
   for (const path of found.references) project.materials.push({ id: `M${project.materials.length + 1}`, text: basename(path), title: basename(path), path,
     kind: 'adaptation', origin: 'adaptation', from: start, to: end, status: 'active', revision: 1 })
+  await D.reuse(root, project, { skip: ['notes', 'experience'].filter(kind => flags[kind]) })
+  await D.discoverProgress(root, project)
   if (existsSync(join(root, '00-状态.md'))) await copyFile(join(root, '00-状态.md'), await safePath(root, '.novel-workshop/接手前状态.md')).catch(async error => {
     if (error.code !== 'ENOENT') throw error
     await mkdir(P.local(root, '.novel-workshop'), { recursive: true }); await copyFile(join(root, '00-状态.md'), P.local(root, '.novel-workshop/接手前状态.md'))
   })
   await P.save(root, project)
   return { imported: P.chapterIds(project).length, range: [start, end], preservedOriginals: true, inheritedApprovals: 0,
-    references: found.references, missingParameters: P.missingParameters(project), nextAction: '读取现行文档，登记有效参数、要求、已有规划依据与本轮授权；历史稿件不自动视为已验收' }
+    references: found.references, documents: project.documents, missingParameters: P.missingParameters(project), nextAction: '读取现行文档，复用已有规划，登记有效参数、要求、已有规划依据与本轮授权；历史稿件不自动视为已验收' }
 }
 async function setScope(root, project, flags) {
   const mode = flags.mode
@@ -110,17 +114,21 @@ async function setScope(root, project, flags) {
   const from = P.integer(flags.from ?? (mode === 'continue' ? Math.min(P.nextChapter(project), project.end) : project.scope.from))
   const to = P.integer(flags.to ?? project.scope.to)
   if (from < project.start || to > project.end || to < from) throw new Error('授权范围超出计划')
-  project.scopeHistory.push({ ...project.scope, supersededAt: new Date().toISOString() })
+  const previous = { ...project.scope }, previousInterval = project.interval
+  const narrowed = mode === previous.mode && from >= previous.from && to <= previous.to && (from !== previous.from || to !== previous.to)
+  project.scopeHistory.push({ ...previous, supersededAt: new Date().toISOString() })
   project.scope = { revision: project.scope.revision + 1, mode, from, to, source: flags.source,
-    reviseApproved: flags['revise-approved'] === true, deliver: flags.deliver === true, formats: formatList(flags.format ?? 'all'), time: new Date().toISOString() }
+    reviseApproved: flags['revise-approved'] === undefined && narrowed ? Boolean(previous.reviseApproved) : flags['revise-approved'] === true,
+    deliver: flags.deliver === undefined && narrowed ? Boolean(previous.deliver) : flags.deliver === true,
+    formats: formatList(flags.format ?? (narrowed ? previous.formats ?? 'all' : 'all')), time: new Date().toISOString() }
   if (flags.interval !== undefined) {
     project.interval = P.integer(flags.interval, '验收间隔', 1)
     P.confirmParameters(project, ['interval'], flags.source)
   }
-  for (const job of project.jobs) if (['pending', 'running'].includes(job.status)) { job.status = 'cancelled'; job.reason = '用户授权已更新，保留结果后按新范围重新派单' }
+  const jobs = await T.updateScopeJobs(root, project, previous, previousInterval)
   project.checkpoint = { time: new Date().toISOString(), scopeRevision: project.scope.revision, nextAction: 'doctor' }
   await P.save(root, project)
-  return project.scope
+  return { ...project.scope, jobs }
 }
 async function mapChapter(root, project, data) {
   const chapter = P.integer(data.chapter)
@@ -139,6 +147,18 @@ async function mapChapter(root, project, data) {
   return project.chapters[chapter]
 }
 async function configure(root, project, data) {
+  const allowed = ['mode', 'plan', 'words', 'interval', 'length', 'maxRepairRounds', 'metadata', 'documents', 'outlines', 'progressFiles', 'autoArchive', 'source']
+  for (const key of Object.keys(data)) if (!allowed.includes(key)) throw new Error(`config不支持${key}；使用mode、plan.start/end、length对象、interval及source`)
+  if (data.length !== undefined && (!data.length || typeof data.length !== 'object' || Array.isArray(data.length))) throw new Error('length需要对象，例如{"type":"source","minRatio":null,"maxRatio":null}；不得传篇幅说明字符串')
+  if (data.documents !== undefined) await D.bind(root, project, data.documents, data.source)
+  if (data.autoArchive !== undefined) {
+    if (typeof data.autoArchive !== 'boolean') throw new Error('autoArchive需要布尔值')
+    project.autoArchive = data.autoArchive
+  }
+  if (data.progressFiles !== undefined) {
+    if (!data.source?.trim()) throw new Error('绑定进度文档需要source说明项目维护要求')
+    await D.bindProgress(root, project, data.progressFiles)
+  }
   const keys = []
   if (data.mode !== undefined) {
     const mode = data.mode === '改编' ? '改编精修' : data.mode
@@ -159,7 +179,9 @@ async function configure(root, project, data) {
   if (data.maxRepairRounds !== undefined) project.maxRepairRounds = P.integer(data.maxRepairRounds, '熔断轮数', 1)
   if (data.metadata) project.metadata = { ...project.metadata, ...data.metadata }
   if (data.length) {
-    const length = { ...project.length, ...data.length }
+    const length = { type: project.length.type, minRatio: project.length.minRatio ?? null, maxRatio: project.length.maxRatio ?? null,
+      ...(project.length.note ? { note: project.length.note } : {}), ...(project.length.source ? { source: project.length.source } : {}), ...data.length }
+    for (const key of Object.keys(length)) if (!['type', 'minRatio', 'maxRatio', 'note', 'source'].includes(key)) throw new Error(`length不支持${key}`)
     if (!['fixed', 'source'].includes(length.type)) throw new Error('length.type 为 fixed 或 source')
     for (const key of ['minRatio', 'maxRatio']) if (length[key] !== null && (typeof length[key] !== 'number' || length[key] < 0)) throw new Error('篇幅比例边界为非负数或 null')
     if (length.minRatio !== null && length.maxRatio !== null && length.minRatio > length.maxRatio) throw new Error('最小篇幅比例不能大于最大值')
@@ -167,12 +189,14 @@ async function configure(root, project, data) {
     if (data.length.type !== undefined && (length.type === 'source' || data.words !== undefined || project.parameters.length?.source)) keys.push('length')
   }
   if (data.words !== undefined && project.length.type === 'fixed') keys.push('length')
+  if (data.outlines !== undefined) await P.bindOutlines(root, project, data.outlines, data.source)
   P.confirmParameters(project, keys, data.source ?? '本次 config 显式参数')
-  if (['mode', 'plan', 'words', 'interval', 'length'].some(key => data[key] !== undefined)) {
+  if (['mode', 'plan', 'words', 'interval', 'length', 'documents', 'outlines'].some(key => data[key] !== undefined)) {
     for (const job of project.jobs) if (['pending', 'running'].includes(job.status)) { job.status = 'cancelled'; job.reason = '制作参数已更新，保留结果后根据新材料重新派单' }
   }
   await P.save(root, project)
-  return { words: project.words, interval: project.interval, maxRepairRounds: project.maxRepairRounds, length: project.length, metadata: project.metadata, missingParameters: P.missingParameters(project) }
+  return { words: project.words, interval: project.interval, maxRepairRounds: project.maxRepairRounds, length: project.length, metadata: project.metadata,
+    documents: project.documents, outlines: project.outlines ?? [], progressFiles: project.progressFiles ?? [], autoArchive: project.autoArchive, missingParameters: P.missingParameters(project) }
 }
 async function merge(root, project, flags) {
   const artifact = String(flags.artifact ?? 'adaptation'), edition = String(flags.edition ?? 'partial')
@@ -194,8 +218,9 @@ async function merge(root, project, flags) {
     }
   } else if (artifact === 'source') {
     if (!project.source || !P.sameStamp(project.source.stamp, await P.optionalStamp(P.local(root, project.source.path)))) throw new Error('底本文件/索引缺失或已变化，先按 doctor 恢复并更新 source')
+    const sourceLines = (await P.textFile(P.local(root, project.source.path), project.source.encoding)).split(/\r?\n/)
     for (const id of Object.keys(project.source.chapters).map(Number).sort((a, b) => a - b)) {
-      const slices = await P.sourceSlices(root, project, [id]), text = slices.map(s => s.text).join('\n\n')
+      const slices = await P.sourceSlices(root, project, [id], sourceLines), text = slices.map(s => s.text).join('\n\n')
       chapters.push({ chapter: id, text, ...P.chapterText(text, project.source.chapters[id].title), name: project.source.path })
     }
   } else {
@@ -231,21 +256,24 @@ async function merge(root, project, flags) {
   await P.save(root, project)
   return { files, artifact, edition, chapters: chapters.length, words: book.total }
 }
-async function main() {
-  const { positional: [command, argument], flags } = args(process.argv.slice(2))
+async function execute(argv, payload) {
+  const readPayload = flags => payload === undefined ? readPayloadFile(flags) : Promise.resolve(payload)
+  const { positional: [command, argument], flags } = args(argv)
   if (!command || command === 'help' || flags.help) {
-    output(`小说工坊：单会话队长与六岗位子代理
+    return `小说工坊：单会话队长与六岗位子代理
 
 novel <命令> <项目目录> [选项]
   init       新书 --title --mode --start --chapters|--end --words --length fixed|source --interval
   import     接手既有目录 --body --baseline <底本> --encoding --start --end
-  doctor     自动诊断、缺失参数、已有任务与下一步 --json [--fix]
+  doctor     自动诊断、缺失参数、已有任务与下一步 --json [--fix|--inspect]
+  documents  查找现有文档用途、标题与目录 --kind characters|style|... --query 关键词 [--offset N --limit N]
   status     进度与有效授权
   config     --source JSON；或 --source 用户依据 --mode --start --end --length --words --interval
   scope      --mode continue|review|revise|pause|export --from --to --source 用户指示 [--deliver] [--revise-approved]
   dispatch   六岗建单 --role 主编|世界|剧情|人物|文笔|复核 --action 动作 [--chapter N|--chapters 1,2|--from N --to N]
   task       查询任务；--id ID --status running --agent 实际子代理ID；failed|cancelled 需要 --reason
   collect    --id ID；收集子代理 result.json 并串行提交，队长不代写
+  draft-check 文笔交稿前精确计量 --task ID --file 任务草稿或result.json（含patches）
   gate       --through 3 --evidence 文件 --source 已有批准依据
   source     建立/刷新底本索引 --file 文件 [--encoding utf-8|gb18030]
   map        底本映射与前章依赖 --source JSON
@@ -258,21 +286,33 @@ novel <命令> <项目目录> [选项]
   calibrate  批次复盘 --source JSON（outline/note）；作者熔断校准（chapters/note/source）
   checkpoint 保存接续说明 --source JSON
   check      集中检查实际状态
-  merge      --artifact adaptation|source|analysis --edition partial|final --format all|txt|docx|epub|md`, false)
-    return
+  archive    目标完成后分类归档过程资料；--preview [--offset N --limit N]只读预览
+  merge      --artifact adaptation|source|analysis --edition partial|final --format all|txt|docx|epub|md`
   }
   if (!argument) throw new Error('缺少项目目录')
   const root = resolve(argument)
-  if (command === 'init') return output(await initialize(root, flags))
-  if (command === 'import') return output(await adopt(root, flags))
-  if (command === 'doctor' && !existsSync(P.local(root, P.MANIFEST))) return output(await W.diagnose(root))
+  if (command === 'doctor' && flags.inspect === true && flags.fix === true) throw new Error('doctor --inspect只读，不能同时使用--fix')
+  if (command === 'documents') {
+    const project = existsSync(P.local(root, P.MANIFEST)) ? await P.load(root) : null
+    const found = await D.inventory(root, project), offset = P.integer(flags.offset ?? 0, '文档偏移'), limit = P.integer(flags.limit ?? 10, '文档页长', 1)
+    const items = found.items.filter(item => (!flags.kind || item.kinds.includes(flags.kind)) && (!flags.query || (item.path + item.title + item.preview).includes(String(flags.query))))
+    return { total: items.length, offset, items: items.slice(offset, offset + limit), targets: D.summary(found).targets, instruction: found.instruction }
+  }
+  if (command === 'init') return await initialize(root, flags)
+  if (command === 'import') return await adopt(root, flags)
+  if (command === 'doctor' && !existsSync(P.local(root, P.MANIFEST))) {
+    const report = await W.diagnose(root)
+    return flags.inspect === true ? W.inspectReport(report) : report
+  }
   const project = await P.load(root)
   switch (command) {
-    case 'doctor':
-      if (flags.fix) await W.safeFix(root, project)
-      return output(await W.diagnose(root, project))
-    case 'status': return output(await W.diagnose(root, project))
-    case 'scope': return output(await setScope(root, project, flags))
+    case 'doctor': {
+      const repair = flags.fix ? await W.safeFix(root, project) : null
+      const report = await W.diagnose(root, project)
+      return flags.inspect === true ? W.inspectReport(report) : { ...report, ...(repair ? { repair } : {}) }
+    }
+    case 'status': return await W.diagnose(root, project)
+    case 'scope': return await setScope(root, project, flags)
     case 'config': {
       const explicit = ['mode', 'start', 'end', 'words', 'interval', 'length'].some(key => flags[key] !== undefined)
       const data = explicit ? { source: flags.source, ...(flags.mode !== undefined ? { mode: flags.mode } : {}),
@@ -280,52 +320,84 @@ novel <命令> <项目目录> [选项]
         ...(flags.words !== undefined ? { words: flags.words } : {}), ...(flags.interval !== undefined ? { interval: flags.interval } : {}),
         ...(flags.length !== undefined ? { length: { type: flags.length } } : {}) } : await readPayload(flags)
       if (explicit && (typeof flags.source !== 'string' || !flags.source.trim())) throw new Error('config 参数确认需要 --source 用户指示或文档依据')
-      return output(await configure(root, project, data))
+      return await configure(root, project, data)
     }
     case 'source':
       if (typeof flags.file !== 'string') throw new Error('需要 --file 底本文件')
       project.source = await P.sourceIndex(root, flags.file, flags.encoding ?? 'utf-8')
-      await P.save(root, project); return output({ indexed: Object.keys(project.source.chapters).length })
+      await P.save(root, project); return { indexed: Object.keys(project.source.chapters).length }
     case 'gate': {
       const through = P.integer(flags.through ?? flags.gate, '阶段门')
       if (through > 3 || typeof flags.evidence !== 'string' || !existsSync(P.local(root, flags.evidence)) || !flags.source) throw new Error('gate 需要0—3、存在的 evidence 文件及 source 批准依据')
       for (let n = flags.gate !== undefined ? through : 0; n <= through; n++) project.gates[n] = { passed: true, evidence: P.portable(root, P.local(root, flags.evidence)), source: flags.source }
-      await P.save(root, project); return output(project.gates)
+      await P.save(root, project); return project.gates
     }
-    case 'map': return output(await mapChapter(root, project, await readPayload(flags)))
-    case 'record': return output(await P.record(root, project, flags.kind, await readPayload(flags)))
-    case 'prepare': return output(await W.context(root, project, P.integer(flags.chapter ?? P.nextChapter(project))))
-    case 'dispatch': return output(await T.dispatch(root, project, { ...flags, chapters: flags.chapters ? String(flags.chapters).split(',') : undefined }))
+    case 'map': return await mapChapter(root, project, await readPayload(flags))
+    case 'record': return await P.record(root, project, flags.kind, await readPayload(flags))
+    case 'prepare': return await W.context(root, project, P.integer(flags.chapter ?? P.nextChapter(project)))
+    case 'dispatch': return await T.dispatch(root, project, { ...flags, chapters: flags.chapters ? String(flags.chapters).split(',') : undefined })
     case 'task':
-      if (!flags.id) return output(project.jobs.map(job => T.taskInfo(root, job)))
+      if (!flags.id) return project.jobs.map(job => T.taskInfo(root, job))
       if (!flags.status) {
         const job = project.jobs.find(x => x.id === flags.id)
         if (!job) throw new Error('任务单不存在')
-        return output(T.taskInfo(root, job))
+        return T.taskInfo(root, job)
       }
-      return output(await T.updateTask(root, project, flags))
-    case 'collect': return output(await T.collect(root, project, flags.id))
+      return await T.updateTask(root, project, flags)
+    case 'collect': return await T.collect(root, project, flags.id)
+    case 'draft-check': return await T.inspectDraft(root, project, flags)
     case 'write':
       if (typeof flags.source !== 'string') throw new Error('需要 --source 草稿文件')
-      return output(await W.writeChapter(root, project, P.integer(flags.chapter ?? P.nextChapter(project)), await P.textFile(resolve(flags.source)), flags['revise-approved'] === true, flags.task))
-    case 'finish': return output(await W.finish(root, project, await readPayload(flags), flags.task))
+      return await W.writeChapter(root, project, P.integer(flags.chapter ?? P.nextChapter(project)), await P.textFile(resolve(flags.source)), flags['revise-approved'] === true, flags.task)
+    case 'finish': return await W.finish(root, project, await readPayload(flags), flags.task)
     case 'accept': {
       const ids = flags.final ? Array.from({ length: project.end - project.start + 1 }, (_, i) => project.start + i) : flags.chapters ? String(flags.chapters).split(',').map(n => P.integer(n)) : range(project, flags)
-      return output(await W.reviewDraft(root, project, ids, flags.final ? 'final' : 'batch'))
+      return await W.reviewDraft(root, project, ids, flags.final ? 'final' : 'batch')
     }
-    case 'review': return output(await W.submitReview(root, project, await readPayload(flags), flags.task))
-    case 'calibrate': return output(await P.calibrate(root, project, await readPayload(flags)))
+    case 'review': return await W.submitReview(root, project, await readPayload(flags), flags.task)
+    case 'calibrate': return await P.calibrate(root, project, await readPayload(flags))
     case 'checkpoint':
       project.checkpoint = { ...await readPayload(flags), time: new Date().toISOString(), scopeRevision: project.scope.revision }
-      await P.save(root, project); return output(project.checkpoint)
+      await P.save(root, project); return project.checkpoint
     case 'check': {
       const diagnosis = await W.diagnose(root, project)
-      output(diagnosis)
-      if ([...(diagnosis.tasks ?? []), ...(diagnosis.diagnostics ?? [])].some(x => ['configure', 'repair-record', 'repair-reference', 'repair-format', 'repair-length', 'reconcile', 'restore-source', 'reindex-source', 'refresh-evidence', 'resolve-gap', 'repair', 'decision', 'circuit-break', 'exception-decision'].includes(x.type))) process.exitCode = 1
-      return
+      return diagnosis
     }
-    case 'merge': return output(await merge(root, project, flags))
+    case 'merge': return await merge(root, project, flags)
+    case 'archive': return await A.archive(root, project, { preview: flags.preview === true, offset: flags.offset, limit: flags.limit })
     default: throw new Error(`未知命令：${command}`)
   }
 }
-try { await main() } catch (error) { console.error(`novel: ${error.message}`); process.exitCode = 1 }
+export async function run(argv, payload) {
+  const result = await execute(argv, payload)
+  const { positional: [command, argument], flags } = args(argv)
+  const completion = ['collect', 'review', 'merge', 'finish', 'record', 'checkpoint', 'scope', 'config', 'calibrate', 'gate'].includes(command) ||
+    command === 'task' && flags.status || command === 'doctor' && flags.fix === true
+  if (!completion || !argument || flags.inspect === true) return result
+  const root = resolve(argument), project = await P.load(root)
+  if (project.autoArchive === false || project.scope.mode === 'pause' || project.jobs.some(job => ['pending', 'running'].includes(job.status))) return result
+  if (['continue', 'revise'].includes(project.scope.mode)) {
+    if (project.issues.some(issue => issue.status === 'open' && P.issueBlocks(issue) && issue.from <= project.scope.to && issue.to >= project.scope.from)) return result
+    for (let id = project.scope.from; id <= project.scope.to; id++) {
+      const current = P.latest(project, id), review = project.reviews.findLast(item => item.chapters.some(row => row.chapter === id))
+      if (!current?.receipt || review?.verdict !== 'passed' || !review.chapters.some(row => row.chapter === id && row.version === current.version)) return result
+    }
+  }
+  const report = await W.diagnose(root, project)
+  if (!['complete', 'archive'].includes(report.stage) || project.jobs.some(job => ['pending', 'running'].includes(job.status))) return result
+  const archived = await A.archive(root, project, { report })
+  if (result?.id?.startsWith('job-')) {
+    const job = project.jobs.find(item => item.id === result.id)
+    return { ...result, ...T.taskInfo(root, job), ...(job.output ? { output: job.output } : {}), archive: archived }
+  }
+  if (command === 'record' && flags.kind === 'material') return { ...project.materials.find(item => item.id === result.id), archive: archived }
+  if (command === 'doctor') return { ...await W.diagnose(root, project), ...(result.repair ? { repair: result.repair } : {}), archive: archived }
+  return typeof result === 'object' && result ? { ...result, archive: archived } : result
+}
+if (process.argv[1] && existsSync(process.argv[1]) && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    const result = await run(process.argv.slice(2))
+    output(result, typeof result !== 'string')
+    if (process.argv[2] === 'check' && [...(result.tasks ?? []), ...(result.diagnostics ?? [])].some(x => ['configure', 'repair-record', 'repair-reference', 'repair-format', 'repair-length', 'reconcile', 'restore-source', 'reindex-source', 'refresh-evidence', 'resolve-gap', 'repair', 'decision', 'circuit-break', 'exception-decision'].includes(x.type))) process.exitCode = 1
+  } catch (error) { console.error(`novel: ${error.message}`); process.exitCode = 1 }
+}

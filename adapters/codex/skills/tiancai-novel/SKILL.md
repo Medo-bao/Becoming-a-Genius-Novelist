@@ -1,18 +1,24 @@
 ---
 name: tiancai-novel
-description: 自动诊断小说项目，在一个主会话中派六岗位子代理完成原创或改编的规划、写作、复核、返修与 TXT、Word、EPUB 交付。用于接手已有小说或持续制作；插件源码维护不启动小说流程。
+description: 仅在用户明确调用 $tiancai-novel、点选本插件，或明确要求使用「我要成为天才小说作家」插件时，派六岗位子代理诊断、制作并交付小说。普通写小说、续写、精修、进度查看、泛称使用插件及源码维护不触发。
 ---
 
 # 自动小说制作
 
-本技能安装在小说项目的 `.agents/skills/tiancai-novel/`。共享[制作手册](../../../.novel-workshop/core/手册.md)说明诊断、范围和质量要求；[派单协议](../../../.novel-workshop/core/派单.md)说明任务与子代理边界；[CLI 协议](../../../.novel-workshop/core/自动制作.md)提供参数。命令在小说项目根运行，跨目录用绝对路径。
+## 调用边界与运行入口
+
+只有本次目标已被用户明确指定使用本插件才执行以下流程。仅看到小说目录、旧scope、正文文件，或收到写小说、使用其他插件、查看进度的普通请求，不调用本技能、不运行CLI、不派岗位任务，也不自动安装项目规则。安装或维护插件本身不启动制作。明确调用后在该目标内持续执行；目标完成、取消或用户转向其他工作后结束本次调用，不给后续请求自动续用。
+
+原生插件包含共享[制作手册](../../../../core/手册.md)、[派单协议](../../../../core/派单.md)与[CLI 协议](../../../../core/自动制作.md)。从宿主提供的当前SKILL.md绝对路径定位插件根目录，运行入口为本文件相对路径`../../../../bin/novel.mjs`；使用其绝对路径，不把当前工作目录当作插件目录。项目安装版的运行入口为`<小说项目>/.novel-workshop/bin/novel.mjs`，共享材料在同目录core下。下文`<运行入口>`和`<小说项目>`须替换为选定入口及目标项目的实际绝对路径。原生插件直接使用内置CLI，不因项目未部署工坊程序而额外复制技能或新建项目规则。
 
 ## 开工与参数
 
-用户说“继续制作”“接手小说”“检查并修复”时先执行：
+新会话的新请求仅“读取docs、查看或确认进度”时，使用DSH `novel_workshop {"action":"doctor","options":{"inspect":true}}`，Codex/CLI用`novel doctor <项目> --inspect --json`。本轮只读汇报，待办放diagnostics，不修登记、不派finish、不据旧scope自动恢复制作。DSH会话只读期间拒绝制作动作；作者明确要求恢复后doctor的inspect设false，再按真实授权续作，无需追加确认。正在执行同一制作任务时，普通进度提问只作简报，随后继续原授权，不因此切换会话只读模式。
+
+用户明确调用本插件并要求“继续制作”“接手小说”“检查并修复”时先执行：
 
 ```bash
-node .novel-workshop/bin/novel.mjs doctor . --json
+node "<运行入口>" doctor "<小说项目>" --json
 ```
 
 尚未登记时先读 discovery 指向的文档与章稿，已有小说 import，新书 init。最新用户指示通过 scope 保存，包含操作类型、范围、来源和实际授予的修订/交付权限。已授权的一批、一卷或全书持续完成，不在每章后重复请示。
@@ -28,12 +34,26 @@ node .novel-workshop/bin/novel.mjs doctor . --json
 1. doctor 选择动作；用 dispatch 创建岗位任务，读取返回的任务提示、材料包、结果路径。
 2. 用原生 spawn 启动该岗位，传项目绝对路径、任务提示和对应岗位卡；用 task 把实际子代理标识绑定任务。已有同岗位子代理可继续派新任务，但复核须与文笔不同。每个文笔单只处理一章，collect 后再派下一章；策划并行时正式目标不重叠。
 3. 子代理仅读指定材料，把结果及辅助文件写到隔离任务目录，不改主账或正式正文。文笔提供正文与两更/出章状态；复核冷读实际版本并填写派单提供的复审草稿，不能只改 true 或照抄作者自评。
-4. 等待子代理完成，队长 collect 验证并串行提交结果；失败或取消用 task --reason 记录原因，再处理后重派。scope变化会取消未完成任务，依据变化的旧结果先重核，不并发写登记；重复collect已完成任务返回原结果。
+4. 等待子代理完成，队长 collect 验证并串行提交结果；失败或取消用 task --reason 记录原因，再处理后重派。范围缩小时按scope返回的jobs.kept/cancelled保留仍有效任务，暂停或受影响任务仍取消，依据变化的旧结果先重核，不并发写登记；重复collect已完成任务返回原结果。
 5. 回到 doctor，继续至 complete/paused，或确需作者回答的 configure、decision、exception-decision、circuit-break。普通问题由岗位子代理在授权内修复。
 
 review 范围只审不改，pause 保持暂停。返修、待裁决破格、熔断和批次校准都受工具入口约束，不以额外派单绕过停笔。每批通过后派剧情子代理核对当前授权内的下一批细纲、伏笔与事实，登记校准再继续。
 
+返修任务直接附本轮manuscript当前稿，默认提交patches定点修改，保留其他场景和已修正确内容；确需整章重写提供rewriteReason。派单时把实际CLI绝对路径传给子代理；文笔保存草稿或result.json后执行`node "<运行入口>" draft-check "<小说项目>" --task TASK_ID --file 任务文件`取得准确汉字数，这不是工程测试。首次独立重写禁止历史旧稿不自动扩大为禁止修订本轮新稿，作者另有明确限制时遵守。
+
+独立复核verdict仅passed/rework。旧问题在resolutions逐项填open/resolved，resolved必须提供resolution及当前版本真实evidence；collect统一更新问题状态，不再让队长逐项手动关账。红项始终阻塞，黄项默认阻塞，非缺陷的可选建议用info或明确blocking:false并说明理由。已提交返修先局部复验，不重复修待验稿。使用派单的本章与关联细纲切片；相同材料共享读取，不额外通读整册。
+
 ## 来源、交付与恢复
+
+目标完成后的收尾由程序分类归档，不派额外整理子代理。最后收件/交付等完成动作会自动处理；接续旧项目若nextAction为archive，直接执行archive后再报告complete。暂停、未完成、仍有未收件任务时保留现场；doctor --inspect只读，不触发整理。
+
+归档清单见00-状态.md；旧任务用task --id查询归档后目录。默认归档任务/草稿/复核草案/阅读回执，额外过程资料用record material的temporary:true及category登记。正文、现行文档、报告、成书及当前引用不移动，不把陌生文件按名称当垃圾。
+
+现行分册用config.outlines的path/from/to及source一次绑定适用范围，逐章map仍可覆盖；不逐章重复选择同一册。doctor/collect诊断提供nextAction.call（DSH可直接调用），文档检索按需分页。
+
+子代理按prompt和context.requiredReads读全实际输入，复核不回抄contract/stamp；文笔先完成初稿、集中修订后精确计量，已有完整MD/TXT可用draftFile交稿，免重复输出全文。跨章问题affectedChapters与from/to覆盖全部待改正文和出章状态。既有进度文档由程序更新当前状态段，保留原要求与历史，不另建主账或重复询问同步授权。
+
+接手先用`node "<运行入口>" documents "<小说项目>" --kind characters`等命令定位现有资料，再read/grep实际相关段落。标题、目录和预览是检索线索，不能冒充已读全文。多份候选回查现行要求后config的documents绑定已有路径；默认01/03/04/05/06不是必须重建清单。策划artifacts优先target/patches原位补充，无缺口时为空，新建同用途文件说明createReason。select-document由代理分析并map选定现有细纲，不把选择转成无依据的新建。
 
 要求用 record 保存来源、生效章区间和替代历史，作者新指示优先。导入指定会话时用可用会话读取工具提取用户指示、目标变化和最终结果，并与现行文档核实；助手自述不代表作者批准，资料缺口不凭猜测补齐。
 

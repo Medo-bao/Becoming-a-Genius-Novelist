@@ -1,6 +1,6 @@
 {
   "name": "@firefly-harness/dsh-tiancai-novel",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "repository": {
     "type": "git",
@@ -21,8 +21,11 @@
     "./icon": "./adapters/dsh/icon.svg"
   },
   "files": [
+    ".codex-plugin/plugin.json",
+    ".agents/plugins/marketplace.json",
     "adapters/dsh/cordis.patch.yml",
     "adapters/dsh/hooks.js",
+    "adapters/dsh/*.mjs",
     "adapters/dsh/locale/*.json",
     "adapters/dsh/icon.svg",
     "core",

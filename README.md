@@ -1,8 +1,29 @@
-# 我要成为天才小说作家
+# 我要成为天才小说作家 · Genius Novelist in the Making
 
 自动诊断小说制作状况，在一个主会话中派六岗位子代理持续完成原创/改编的规划、写作、复审、返修与交付。队长只编排与收集，正文由文笔子代理创作，减少作者逐章主动对话。
 
+本轮返修收敛、跨册关联、跨章复验与自动计量更新统一归入1.0.1，版本号保持不变。先前本地1.0.2/1.0.3仅为工作标记，当前使用重新生成的1.0.1安装包，详见[验收记录](docs/1.0.1验收记录.md)。
+
+接手现有文档时按用途、标题和目录检索，复用人物、世界、大纲、文风及分册细纲；多份候选先分析再绑定。策划原位补充，已有成果完整时不新增文件，同用途新文档需说明原因。版本继续保持1.0.1。
+
 ## 使用
+
+Codex仅在明确调用`$tiancai-novel`、点选本插件或明确要求使用「我要成为天才小说作家」插件后运行。普通写小说、续写、精修、查看进度或使用其他插件不触发；旧项目登记和scope不构成新任务的调用授权。安装插件本身不启动制作。
+
+原生Codex插件安装：
+
+```powershell
+codex plugin marketplace add "<解压后的插件绝对目录>"
+codex plugin add tiancai-novel@tiancai-novel-local
+```
+
+安装后新开聊天即可明确调用；若尚未刷新，在方便时重启Codex。原生版直接使用内置CLI，不必先部署到小说项目。项目级安装方式仍见下文，调用策略相同。
+
+目标完成后会自动分类归档过程资料，清单入口在00-状态.md。任务产物、临时草稿、复核草案、阅读回执及已登记的清理记录分别保存；正式正文、现行规划、报告、成书和当前引用保留。可用archive --preview只读预览，或config设置autoArchive=false关闭自动归档。
+
+仅读取资料/确认进度支持doctor --inspect，DSH用options.inspect=true；明确继续制作后inspect=false。已登记数字TXT采用稿按真实登记版本识别，旧版通过与当前稿待验分别报告。
+
+1.0.1现已按dsh2实测补充：缩小范围保留有效任务、跨章影响范围归并、整册细纲范围绑定、完整必读清单、草稿文件直接交稿、复核模板精简及既有进度文档自动同步。集中修改后计量，减少重复派单和全文回抄；详细效率分析见[功能优化建议](docs/功能优化建议.md)。
 
 在本项目目录安装到小说项目：
 
@@ -13,7 +34,7 @@ node bin/install.mjs --target codex --dir "E:\小说\新书"
 源码仓库：[Becoming-a-Genius-Novelist](https://github.com/Medo-bao/Becoming-a-Genius-Novelist)。下载发行包并解压，或使用 Git：
 
 ```powershell
-git clone https://github.com/Medo-bao/-.git tiancai-novel
+git clone https://github.com/Medo-bao/Becoming-a-Genius-Novelist.git tiancai-novel
 cd tiancai-novel
 ```
 
@@ -33,7 +54,9 @@ DSH中安装本地bundle后，新会话选择同名预设：
 plugin_manager action=install_bundle target="<解压后的插件绝对目录>"
 ```
 
-DSH与Codex共用核心流程和CLI。DSH使用独立worker preset，子代理不提供shell和再次委派工具，只能写自己已绑定的任务目录；当前无法指定受限worker的DSH workflow入口停止提供，六岗位由原生subagent完成派单。Codex使用原生子代理，工具权限由Codex宿主控制。ZCode专门适配留待后续，原始入口保留。
+DSH与Codex共用制作核心。DSH队长使用专用novel_workshop工具，移除通用shell、直接文件写入、手动subagent/workflow及send_message入口；dispatch自动建单、启动全新岗位worker并绑定真实ID，收件后直接返回下一步诊断。worker提供五个文件工具与受限novel_draft计量，只能写当前任务目录，实际读完任务材料后才可提交。Codex继续使用原生子代理与CLI，工具权限由Codex宿主控制。ZCode专门适配留待后续，原始入口保留。
+
+从旧版升级DSH时重新安装bundle并重启，再启动新worker；旧会话不会自动获得新工具配置。无需重写既有章稿，应导入后补做独立复核。
 
 ## 主要能力
 
@@ -43,6 +66,7 @@ DSH与Codex共用核心流程和CLI。DSH使用独立worker preset，子代理�
 - prepare提供底本切片、细纲、前章结果、有效要求、相关事实、经验与到期伏笔；改编按原章篇幅诊断。
 - write不覆盖旧稿；finish自动维护两更、经验与接续状态。
 - accept/review形成带真实引文的复审与问题闭环；要求、事实、入章状态和依赖章版本/出章状态变化后，受影响章重新复验。
+- 返修提供本轮当前稿及已解决问题摘要，默认patches定点修改；独立复核用resolutions及新版引文关闭旧问题，逐章追踪已修待验状态，跨批问题完整复核，可选建议不反复派修。细纲补齐跨册直接关联，同批材料共享读取；DSH保存result.json后自动反馈准确字数。
 - partial阶段稿与final正式全书分开；原作底本、原作分析与改编正文分开，支持TXT、DOCX、EPUB、Markdown。
 - DOCX含章节导航、分页和页脚页码；EPUB支持作者、简介、语言、可选封面与目录。
 - 破格申请：`record --kind exception` 登记“想突破什么 + 代价 + 范围”，待用户裁决；批准后才进正文。

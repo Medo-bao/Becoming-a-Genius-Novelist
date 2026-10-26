@@ -93,6 +93,8 @@ async function installCodexSkill(projectDir) {
   const dest = join(projectDir, '.agents', 'skills', 'tiancai-novel')
   await mkdir(dest, { recursive: true })
   await cp(join(REPO, 'adapters', 'codex', 'skills', 'tiancai-novel'), dest, { recursive: true, force: true })
+  const entry = join(dest, 'SKILL.md')
+  await writeFile(entry, (await readFile(entry, 'utf8')).replaceAll('](../../../../core/', '](../../../.novel-workshop/core/'), 'utf8')
   return dest
 }
 
@@ -143,7 +145,7 @@ async function main() {
   }
 
   lines.push('', target === 'codex'
-    ? '下一步：在该目录打开 Codex，使用 $tiancai-novel；先检查已知参数，再由队长派六岗位子代理制作。若新技能尚未显示，在该项目新开聊天。'
+    ? '安装完成，尚未启动小说流程。仅在明确使用 $tiancai-novel 或点选本插件时运行；普通写小说请求不主动调用。若新技能尚未显示，在该项目新开聊天。'
     : '下一步：给智能体发一句「按 AGENTS.md 检查项目」；ZCode 专门适配仍待后续。')
   process.stdout.write(lines.join('\n') + '\n')
 }

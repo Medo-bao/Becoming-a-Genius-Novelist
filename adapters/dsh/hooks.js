@@ -16,10 +16,13 @@ import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { inside, safePath } from '../../bin/paths.mjs'
+import { assertMaterialsRead, observeReading } from './materials.mjs'
+import { registerWorkshop } from './workshop.mjs'
+import { inspectDraft } from '../../bin/tasks.mjs'
 
 export const name = 'novel-hooks'
 
-export const inject = ['systemPrompt', 'fs', 'tools', 'agents', 'workingDirectory']
+export const inject = ['systemPrompt', 'fs', 'tools', 'agents', 'workingDirectory', 'subagents']
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO = resolve(HERE, '..', '..')
@@ -35,28 +38,36 @@ const CORE_DST = join(WORKSHOP, 'core')
 
 /** 常驻提示：短、确定、每次组装都在，不依赖模型记住会话开头。 */
 const RULES = `[小说工坊·硬规则]
-1. 队长开工doctor，按nextAction在同一作者会话循环到授权完成。configure缺项先查当前指令与资料，只集中询问未规定的篇幅、审查间隔等参数，用config记录依据；默认值不算作者规定。
-2. 六岗位由真实的独立subagent执行，固定使用tiancai-novel-worker预设；队长只诊断、派单、收件和汇报，不写正文，不在同一上下文切帽代做。当前不使用workflow派单。
-3. 队长dispatch任务→用真实子代理ID绑定task→子代理只写任务resultPath→队长collect串行入库；文笔提交正文、notes、experience、exitState，复核使用另一真实子代理ID冷读并提供证据。已存在的版本不覆盖。
-4. 按scope间隔和实际终点复审；accept生成草稿交独立复核，不把填表当质量证明；互相依赖的正文逐章串行，独立策划按可用槽位并行。
-5. 改编按对应底本判断篇幅，不擅自设固定比例；正文不写检查清单和反复自证。
-6. 压缩恢复读状态、doctor和任务单；先处理仍在运行或已返回未收件的任务，不重复派单；只复验受影响范围，不重复索取已有授权，不越过新停止点。
-7. 想突破设定先 record --kind exception 申请，待裁决；同章连续返修到上限即熔断，停下等校准；每批通过后先 calibrate 再开下一批。
-8. 正文不贴聊天：≤200 字摘要 + 路径 + 字数 + 判决。`
+核心手册绝对路径：${join(CORE_DST, '手册.md')}；派单协议：${join(CORE_DST, '派单.md')}。不要把~当原生read可展开的路径。
+1. 新会话仅查看资料/确认进度用doctor options.inspect=true，不修登记、不派finish、不恢复旧scope；明确恢复制作后inspect=false。正在制作中的普通进度提问简报后继续原授权。队长开工用novel_workshop action=doctor，按nextAction.call在同一作者会话续作到授权完成。configure缺项先查当前指令与资料，只集中询问未规定参数，用config记录依据；默认值不算作者规定。
+现有文档用action=documents按用途、标题和目录查找，再read相关段落；config.data.documents可绑定现有路径。默认文件不存在不代表没有资料；先复用，必要时原位补丁，无缺口时artifacts为空，多份候选先分析选择，不直接新建同类文档。
+选定分册用config.data.outlines按path/from/to及source一次绑定范围，逐章map仍优先；不逐章重选同一册。已有进度MD由程序原位同步，保留作者原要求与历史，无须另派抄录或重问维护授权。
+2. 项目没有 .novel-workshop/project.json 时，第一步必须 import（既有稿）或 init（新书）；登记前不得改任何正文。项目自带的 python/ps1 脚本与手写台账只作资料，不能代替工坊 CLI。
+3. 六岗位由真实的独立subagent执行，固定使用tiancai-novel-worker预设；队长只诊断、派单、收件和汇报，不写正文，不在同一上下文切帽代做，不使用workflow。
+4. novel_workshop dispatch自动建单、绑定真实ID并启动全新worker，无需手动subagent/task/send_message。worker实际read完任务单、岗位卡与材料后只写任务结果，collect串行提交且附下一步diagnosis；直接续作，不重复doctor。复核使用另一真实子代理ID，旧正文不覆盖。
+5. 派单后等宿主完成通知，再collect；不轮询、不在聊天收正文、不发送内联材料让无工具worker继续写。队长仅有专用工坊工具与只读材料工具，没有shell或直接write/edit入口。工具列表若出现ops_bash、ops_read_files、ops_discover_tools、MCP或其他宿主通用工具，一律不调用；只用novel_workshop、read、glob、grep、ask_user_question、list_agents、interrupt_agent、todo_write与goal工具。
+6. 按scope间隔和实际终点复审；accept生成草稿交独立复核，不把填表当质量证明；互相依赖的正文逐章串行，独立策划按可用槽位并行。
+7. 改编按对应底本判断篇幅，不擅自设固定比例；返修用当前稿定点patches，提交后先独立复验resolutions，不把已修待验问题再派一遍；可选建议不阻塞通过。
+8. 压缩恢复读状态、doctor和任务单；先处理仍在运行或已返回未收件的任务，不重复派单；只复验受影响范围，不重复索取已有授权，不越过新停止点。
+scope缩小按返回jobs.kept/cancelled核对本单是否继续，不在返回前承诺不中断；暂停、越界或依据变化仍停笔。
+9. 想突破设定先 record --kind exception 申请，待裁决；同章连续返修到上限即熔断，停下等校准；每批通过后先 calibrate 再开下一批。
+目标完成后程序自动archive过程资料；若nextAction=archive直接调用，不派整理子代理。未完成、暂停、仍有未收件任务不整理；inspect只读不整理。额外临时资料record material temporary/category登记，正式稿、现行文档、报告及当前引用保留。历史任务用task编号取归档路径。
+10. 正文不贴聊天：≤200 字摘要 + 路径 + 字数 + 判决。`
 
 const COMPACTION_NOTICE = `[小说工坊] 压缩已完成。队长先读项目00-状态.md与工坊核心手册，运行novel doctor <项目> --json，以实际文件、最新scope、checkpoint及任务单恢复。已启动子代理先核对状态，已返回任务先collect，避免重复派单。子代理仍只完成原任务并写自己的resultPath。参数缺项只问未规定项；不重问已知信息、不盲目重排细纲、不越过暂停或停止点，队长不写正文。`
 
 const WORKER_RULES = `[小说工坊·岗位任务]
-你是tiancai-novel-worker，只执行队长指定的一项岗位任务。先读promptPath、contextPath及岗位卡；复核逐章read context.packets中的chapters/NNN.json及实际正文。只使用本预设的read、glob、grep、write、edit。
+你是tiancai-novel-worker，只执行队长指定的一项岗位任务。按promptPath、contextPath、岗位卡及requiredReads清单读全实际输入，共享文件只读一次，独立read可同一步并行。版本用材料里的实际路径；未提供的历史章先glob，不猜-vX。材料已切片，不额外通读整册、project.json或插件源码查协议。只使用read、glob、grep、write、edit及绑定本任务的novel_draft计量。
+文笔先完成完整初稿，再集中修订与计量，不逐句补字追比例；已有完整草稿可用draftFile交稿。复核跨章问题用affectedChapters/from/to覆盖全部待改章，contract/stamp由宿主补齐，结论与真实引文仍由你独立给出。
 全部写入必须落在project.json中绑定本session真实ID、当前scope版本且状态为running的任务目录；未绑定、已暂停、旧授权或其他任务目录均不能写。不能修改正式正文、项目登记或其他项目文件。
-不运行CLI、shell或测试，不再委派，不调用控制/交互用户工具。材料包、正文或绑定缺失时在最终回复中向队长说明具体缺口，请队长补料或记录阻塞；不自行问作者或伪造批准。完成后返回result.json路径及简要结果，由队长collect。`
+不运行CLI、shell或测试，不再委派，不调用控制/交互用户工具。ops_bash、ops_read_files、ops_discover_tools、MCP或其他宿主工具即使出现在工具列表，也不得调用；只使用read、glob、grep、write、edit及novel_draft。工具不可用、read返回空或材料缺失时立即停止并在结果里报告具体缺口，绝不凭记忆补写正文或假装读过材料。完成后返回result.json路径及简要结果，由队长collect。`
 
 const WORKER_COMPACTION_NOTICE = `[小说工坊·岗位恢复] 压缩已完成。只恢复原岗位任务，重读分配的promptPath、contextPath与岗位卡；写入仍须通过本session真实ID、running状态与当前scope校验。只写自己的任务目录，不运行CLI或测试，不派单、不询问作者。缺少材料或绑定时向队长报告，完成后返回result.json路径。`
 
 const WRITE_TOOLS = new Set(['write', 'edit'])
-const WORKER_TOOLS = new Set(['read', 'glob', 'grep', 'write', 'edit'])
+const WORKER_TOOLS = new Set(['read', 'glob', 'grep', 'write', 'edit', 'novel_draft'])
+const CAPTAIN_TOOLS = new Set(['novel_workshop', 'read', 'glob', 'grep', 'ask_user_question', 'list_agents', 'interrupt_agent', 'todo_write', 'get_goal', 'create_goal', 'update_goal'])
 const MANIFEST = '.novel-workshop/project.json'
-
 /** 把仓库资产同步到稳定路径；失败只记日志，不影响预设装载。 */
 async function syncAssets(ctx) {
   try {
@@ -70,29 +81,6 @@ async function syncAssets(ctx) {
     }
   } catch (error) {
     ctx.logger?.warn?.(`novel-workshop: 资产同步失败：${String(error)}`)
-  }
-}
-
-/** 从写入参数里认出「正文文件」，返回项目根、章号、候选细纲路径。 */
-function chapterTarget(raw) {
-  if (typeof raw !== 'string' || raw.length === 0) return null
-  const norm = raw.replace(/\\/g, '/')
-  const match = norm.match(/^(.*)\/(?:09-正文|正文)\/([^/]+)$/)
-  if (match === null) return null
-  const root = match[1]
-  const fileName = match[2]
-  const chapter = fileName.match(/^第(\d+)章-v([1-9]\d*)\.md$/)
-  if (chapter === null) return null
-  const digits = String(Number(chapter[1]))
-  const padded = digits.padStart(3, '0')
-  return {
-    root,
-    target: norm,
-    chapter: padded,
-    outlines: [
-      `${root}/06-细纲/第${padded}章.md`,
-      `${root}/06-细纲/第${digits}章.md`,
-    ],
   }
 }
 
@@ -126,27 +114,6 @@ async function executionPath(ctx, exec) {
   return { hostPath: ctx.fs.processPath(target), cwd }
 }
 
-async function assertCoordinatorWrite(ctx, exec, hostPath, cwd) {
-  const roots = new Set()
-  for (const start of [exec.agent?.session?.header?.cwd, cwd, dirname(hostPath)]) {
-    const found = await findProject(start)
-    if (!found || roots.has(found.root)) continue
-    roots.add(found.root)
-    if (inside(found.root, hostPath)) await safePath(found.root, hostPath)
-    if (inside(resolve(found.root, found.project.paths.body), hostPath)) {
-      throw new Error('正文由文笔子代理写入任务目录的 resultPath，再由队长 novel collect 收件；授权、旧稿与批次状态由同一 CLI 核对。')
-    }
-  }
-  if (!/(?:^|[\\/])(?:09-正文|正文)[\\/]第/.test(hostPath)) return
-  const hit = chapterTarget(hostPath)
-  if (hit === null) throw new Error('正文文件请使用 第NNN章-vX.md 命名。')
-  await safePath(hit.root, hostPath)
-  let hasOutline = false
-  for (const path of hit.outlines) if (existsSync(await safePath(hit.root, path))) hasOutline = true
-  if (!hasOutline) throw new Error(`缺少本章细纲：${hit.outlines[0]}。先写细纲，再动笔（手册 G3）。`)
-  if (existsSync(hostPath)) throw new Error(`正文版本已存在：${hostPath}。改稿请新增版本号（第${hit.chapter}章-vX+1.md），不要覆盖旧版。`)
-}
-
 async function assertWorkerWrite(ctx, exec, hostPath, cwd, projects) {
   const session = exec.agent?.session, header = session?.header
   if (!header || typeof header.id !== 'string' || !header.id || header.origin !== 'subagent' ||
@@ -168,7 +135,8 @@ async function assertWorkerWrite(ctx, exec, hostPath, cwd, projects) {
     if (!inside(directory, hostPath) || samePath(directory, hostPath)) continue
     await safePath(root, hostPath)
     await safePath(directory, hostPath)
-    return
+    await assertMaterialsRead(exec, root, job, hostPath)
+    return { root, project, job }
   }
   throw new Error('只能写入绑定本子代理ID、当前scope版本且状态为running的任务目录；请由队长核对task绑定')
 }
@@ -176,9 +144,9 @@ async function assertWorkerWrite(ctx, exec, hostPath, cwd, projects) {
 /** 异步路径核对由单调 guard 兜底；被其他 pre-execute 短路的写入也不放行。 */
 function installWriteGuards(ctx, worker) {
   const checked = new WeakMap(), projects = new WeakMap()
-  const toolReason = exec => worker && !WORKER_TOOLS.has(exec.name) ? '岗位预设仅允许read、glob、grep、write、edit，不提供shell、控制、用户交互或再次委派' :
-    !worker && exec.name === 'workflow' ? '当前workflow后端不能选择受限worker预设；请使用原生subagent派单' : undefined
-  const assertWrite = async (exec, hostPath, cwd) => worker ? assertWorkerWrite(ctx, exec, hostPath, cwd, projects) : assertCoordinatorWrite(ctx, exec, hostPath, cwd)
+  const toolReason = exec => worker && !WORKER_TOOLS.has(exec.name) ? '岗位预设仅允许文件工具及novel_draft计量，不提供shell、控制、用户交互或再次委派' :
+    !worker && !CAPTAIN_TOOLS.has(exec.name) ? '队长读取文件用read/glob/grep，ops_read_files等额外宿主工具未接入本预设；制作用novel_workshop，不提供shell、直接写入或手动派单；不要用shell或插件源码排查替代正确工具参数' : undefined
+  const assertWrite = async (exec, hostPath, cwd) => worker ? assertWorkerWrite(ctx, exec, hostPath, cwd, projects) : Promise.reject(new Error('队长文件提交只能经专用工坊工具，由collect维护版本与验收'))
   ctx.on('tools/pre-execute', async (exec, next) => {
     const reason = toolReason(exec)
     if (reason) return { kind: 'deny', reason }
@@ -186,8 +154,8 @@ function installWriteGuards(ctx, worker) {
     checked.delete(exec)
     try {
       const { hostPath, cwd } = await executionPath(ctx, exec)
-      await assertWrite(exec, hostPath, cwd)
-      checked.set(exec, { agent: exec.agent, name: exec.name, path: fileArgument(exec) })
+      const binding = await assertWrite(exec, hostPath, cwd)
+      checked.set(exec, { agent: exec.agent, name: exec.name, path: fileArgument(exec), hostPath, binding })
       return next()
     } catch (error) {
       return { kind: 'deny', reason: `小说工坊写入核对失败：${String(error)}` }
@@ -200,9 +168,41 @@ function installWriteGuards(ctx, worker) {
     if (!ticket || ticket.agent !== exec.agent || ticket.name !== exec.name || ticket.path !== fileArgument(exec)) return '小说工坊写入尚未通过路径与任务身份核对'
   })
   for (const event of ['fs/write-intent', 'fs/edit-intent']) ctx.on(event, async (target, exec, next) => {
-    const cwd = exec.agent === undefined ? undefined : await ctx.workingDirectory.ensure(exec.agent, exec.signal)
+    // actor 按宿主类型允许缺省；非工具写入没有可核对的身份，交给其他策略处理。
+    if (exec === undefined || exec.agent === undefined) return next()
+    const cwd = await ctx.workingDirectory.ensure(exec.agent, exec.signal)
     await assertWrite(exec, ctx.fs.processPath(target), cwd)
     return next()
+  })
+  if (worker) ctx.on('tools/post-execute', async (exec, result, next) => {
+    const decision = await next()
+    if (decision.kind === 'block' || result.isError) return decision
+    if (exec.name === 'read') observeReading(exec, result)
+    const ticket = WRITE_TOOLS.has(exec.name) && checked.get(exec)
+    const binding = ticket?.binding
+    if (!binding || binding.job.role !== '文笔' || binding.job.action === 'finish' ||
+        !samePath(ticket.hostPath, resolve(binding.root, binding.job.directory, 'result.json'))) return decision
+    let feedback
+    try {
+      const count = await inspectDraft(binding.root, binding.project, { task: binding.job.id, file: ticket.hostPath })
+      feedback = `result.json已保存，宿主自动计量：${JSON.stringify(count)}\n本次结果无需重复调用novel_draft；按实际计量和场景完整性修订后再交回队长。`
+    } catch (error) {
+      feedback = `result.json已保存，但尚不能计量：${error.message}。请在本任务内修正结果；这不是收件通过，也不必重新派单。`
+    }
+    return { ...decision, additionalContexts: [...(decision.additionalContexts ?? []), {
+      id: randomUUID(), role: 'user', content: [{ type: 'text', text: feedback }], source: { kind: 'novel-workshop' },
+    }] }
+  })
+  if (worker) ctx.tools.register({
+    name: 'novel_draft', description: '精确计量本任务已保存的Markdown草稿或result.json（含patches）；返回正文汉字数、与当前稿差值及作者篇幅政策。只读取绑定任务的产物，不改主账，不运行测试。',
+    parameters: { type: 'object', additionalProperties: false, required: ['file_path'], properties: { file_path: { type: 'string', description: '本任务目录内已保存的草稿或result.json绝对路径' } } },
+    output: { schema: { type: 'object', additionalProperties: true }, render(_args, value) { return [{ type: 'text', text: JSON.stringify(value) }] } },
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const { hostPath, cwd } = await executionPath(ctx, { ...exec, arguments: args })
+      const { root, project, job } = await assertWorkerWrite(ctx, exec, hostPath, cwd, projects)
+      return inspectDraft(root, project, { task: job.id, file: hostPath })
+    },
   })
 }
 
@@ -228,19 +228,40 @@ function compactionNotifier(ctx, worker) {
 
 /**
  * 注册全部钩子。
+ * 钩子与工具先同步注册，最后等待资产同步完成再结束插件装载；
+ * 这样首个模型步骤读到的手册与仓库 core 一致，不会读到上一版缓存。
  * @param ctx - 预设作用域的插件上下文。
  */
-export function apply(ctx, config = {}) {
+export async function apply(ctx, config = {}) {
   const worker = config.worker === true
-  if (worker) {
-    ctx.tools.presentAs('native')
-    ctx.tools.restrict({ allow: [] })
-  } else {
-    ctx.effect(() => {
-      void syncAssets(ctx)
-      return () => {}
-    }, 'novel-workshop: 资产同步')
+  const allow = worker ? [...WORKER_TOOLS] : [...CAPTAIN_TOOLS]
+  const requiredTools = worker ? [...WORKER_TOOLS] : ['novel_workshop', 'read', 'glob', 'grep', 'ask_user_question']
+  const presetId = worker ? 'tiancai-novel-worker' : 'tiancai-novel'
+  const applied = new WeakSet()
+  const isolate = (agent) => {
+    if (!agent?.ctx?.tools || applied.has(agent)) return
+    applied.add(agent)
+    try {
+      ctx.effect(() => agent.ctx.tools.presentAs('native'), 'novel-workshop: 工具展示')
+      ctx.effect(() => agent.ctx.tools.restrict({ allow }), 'novel-workshop: 工具隔离')
+      for (const name of requiredTools) {
+        if (!agent.ctx.tools.get(name, agent)) throw new Error(`小说预设缺少可用工具${name}，停止启动；请更新bundle并重启DSH，不以零工具继续制作`)
+      }
+    } catch (error) {
+      applied.delete(agent)
+      throw error
+    }
   }
+  // 预设是多个agent的父作用域，在实际实例上限制继承工具。
+  ctx.on('agent/created', ({ agent }) => isolate(agent))
+  // 标准会话在首轮前切到小说预设不会重发agent/created；这里补做实例级隔离。
+  ctx.on('agent-preset/selected', (sessionId, selected) => {
+    if (selected !== presetId) return
+    const agent = ctx.agents?.get?.(sessionId)
+    if (!agent) return
+    try { isolate(agent) } catch (error) { ctx.logger?.warn?.(`novel-workshop: 切换预设后的工具隔离失败：${String(error)}`) }
+  })
+  if (!worker) registerWorkshop(ctx)
 
   ctx.effect(
     () =>
@@ -254,4 +275,14 @@ export function apply(ctx, config = {}) {
 
   ctx.effect(() => ctx.on('session/event', compactionNotifier(ctx, worker)), 'novel-workshop: 压缩提醒')
   installWriteGuards(ctx, worker)
+  // 插件热重载/已存在的会话：按当前composition补做隔离，避免只在agent/created时生效。
+  for (const agent of ctx.agents?.list?.() ?? []) {
+    try {
+      if (ctx.get?.('agentPresets')?.composedPreset?.(agent.ctx) === presetId) isolate(agent)
+    } catch (error) {
+      ctx.logger?.warn?.(`novel-workshop: 核对既有agent失败：${String(error)}`)
+    }
+  }
+  // 失败只记日志，不阻止预设装载；成功后才允许首个agent启动。
+  if (!worker) await syncAssets(ctx)
 }
