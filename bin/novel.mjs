@@ -8,6 +8,7 @@ import * as W from './production.mjs'
 import * as T from './tasks.mjs'
 import * as D from './documents.mjs'
 import * as A from './archive.mjs'
+import { runtime } from './runtime.mjs'
 import { bookFormats } from './book-formats.mjs'
 import { safePath, managedPath } from './paths.mjs'
 
@@ -113,7 +114,7 @@ async function setScope(root, project, flags) {
   if (typeof flags.source !== 'string' || !flags.source.trim()) throw new Error('scope 必须记录用户本轮指示来源 --source')
   const from = P.integer(flags.from ?? (mode === 'continue' ? Math.min(P.nextChapter(project), project.end) : project.scope.from))
   const to = P.integer(flags.to ?? project.scope.to)
-  if (from < project.start || to > project.end || to < from) throw new Error('授权范围超出计划')
+  if (from < project.start || to > project.end || to < from) throw new Error(`授权范围超出计划：当前全书${project.start}—${project.end}，请求${from}—${to}；先按现行文档用config --start/--end --source更新全书计划，再设置本轮scope；不自动扩大授权`)
   const previous = { ...project.scope }, previousInterval = project.interval
   const narrowed = mode === previous.mode && from >= previous.from && to <= previous.to && (from !== previous.from || to !== previous.to)
   project.scopeHistory.push({ ...previous, supersededAt: new Date().toISOString() })
@@ -265,7 +266,7 @@ async function execute(argv, payload) {
 novel <命令> <项目目录> [选项]
   init       新书 --title --mode --start --chapters|--end --words --length fixed|source --interval
   import     接手既有目录 --body --baseline <底本> --encoding --start --end
-  doctor     自动诊断、缺失参数、已有任务与下一步 --json [--fix|--inspect]
+  doctor     自动诊断、缺失参数、已有任务与下一步 --json [--compact] [--fix|--inspect]
   documents  查找现有文档用途、标题与目录 --kind characters|style|... --query 关键词 [--offset N --limit N]
   status     进度与有效授权
   config     --source JSON；或 --source 用户依据 --mode --start --end --length --words --interval
@@ -274,6 +275,7 @@ novel <命令> <项目目录> [选项]
   task       查询任务；--id ID --status running --agent 实际子代理ID；failed|cancelled 需要 --reason
   collect    --id ID；收集子代理 result.json 并串行提交，队长不代写
   draft-check 文笔交稿前精确计量 --task ID --file 任务草稿或result.json（含patches）
+  result-check 原复核结果只读预检 --task ID；不提交、不改判决或正文
   gate       --through 3 --evidence 文件 --source 已有批准依据
   source     建立/刷新底本索引 --file 文件 [--encoding utf-8|gb18030]
   map        底本映射与前章依赖 --source JSON
@@ -287,6 +289,7 @@ novel <命令> <项目目录> [选项]
   checkpoint 保存接续说明 --source JSON
   check      集中检查实际状态
   archive    目标完成后分类归档过程资料；--preview [--offset N --limit N]只读预览
+  --compact  doctor/dispatch/collect/task/scope/config等的精简JSON，保留路径及下一步；完整材料留在context/result文件
   merge      --artifact adaptation|source|analysis --edition partial|final --format all|txt|docx|epub|md`
   }
   if (!argument) throw new Error('缺少项目目录')
@@ -346,6 +349,7 @@ novel <命令> <项目目录> [选项]
       return await T.updateTask(root, project, flags)
     case 'collect': return await T.collect(root, project, flags.id)
     case 'draft-check': return await T.inspectDraft(root, project, flags)
+    case 'result-check': return await T.inspectResult(root, project, flags.task ?? flags.id)
     case 'write':
       if (typeof flags.source !== 'string') throw new Error('需要 --source 草稿文件')
       return await W.writeChapter(root, project, P.integer(flags.chapter ?? P.nextChapter(project)), await P.textFile(resolve(flags.source)), flags['revise-approved'] === true, flags.task)
@@ -355,7 +359,7 @@ novel <命令> <项目目录> [选项]
       return await W.reviewDraft(root, project, ids, flags.final ? 'final' : 'batch')
     }
     case 'review': return await W.submitReview(root, project, await readPayload(flags), flags.task)
-    case 'calibrate': return await P.calibrate(root, project, await readPayload(flags))
+    case 'calibrate': return await P.calibrate(root, project, await readPayload(flags), (await W.approvals(root, project)).approved)
     case 'checkpoint':
       project.checkpoint = { ...await readPayload(flags), time: new Date().toISOString(), scopeRevision: project.scope.revision }
       await P.save(root, project); return project.checkpoint
@@ -368,7 +372,7 @@ novel <命令> <项目目录> [选项]
     default: throw new Error(`未知命令：${command}`)
   }
 }
-export async function run(argv, payload) {
+async function runManaged(argv, payload) {
   const result = await execute(argv, payload)
   const { positional: [command, argument], flags } = args(argv)
   const completion = ['collect', 'review', 'merge', 'finish', 'record', 'checkpoint', 'scope', 'config', 'calibrate', 'gate'].includes(command) ||
@@ -380,7 +384,8 @@ export async function run(argv, payload) {
     if (project.issues.some(issue => issue.status === 'open' && P.issueBlocks(issue) && issue.from <= project.scope.to && issue.to >= project.scope.from)) return result
     for (let id = project.scope.from; id <= project.scope.to; id++) {
       const current = P.latest(project, id), review = project.reviews.findLast(item => item.chapters.some(row => row.chapter === id))
-      if (!current?.receipt || review?.verdict !== 'passed' || !review.chapters.some(row => row.chapter === id && row.version === current.version)) return result
+      const row = review?.chapters.find(row => row.chapter === id)
+      if (!current?.receipt || !row || P.rowVerdict(review, row) !== 'passed' || row.version !== current.version) return result
     }
   }
   const report = await W.diagnose(root, project)
@@ -394,10 +399,36 @@ export async function run(argv, payload) {
   if (command === 'doctor') return { ...await W.diagnose(root, project), ...(result.repair ? { repair: result.repair } : {}), archive: archived }
   return typeof result === 'object' && result ? { ...result, archive: archived } : result
 }
+function compactDiagnosis(report) {
+  const counts = list => (list ?? []).reduce((all, item) => ({ ...all, [item.type]: (all[item.type] ?? 0) + 1 }), {})
+  return { ...report, tasks: report.tasks?.slice(0, 10), diagnostics: report.diagnostics?.slice(0, 10),
+    counts: { tasks: report.tasks?.length ?? 0, diagnostics: report.diagnostics?.length ?? 0, taskTypes: counts(report.tasks), diagnosticTypes: counts(report.diagnostics) },
+    ...(report.documents ? { documents: Object.fromEntries(Object.entries(report.documents).map(([name, item]) => [name, { path: item.path, status: item.status, candidateCount: item.candidateCount }])) } : {}) }
+}
+export async function run(argv, payload) {
+  const result = await runManaged(argv, payload)
+  const { positional: [command, argument], flags } = args(argv)
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return result
+  if (!flags.compact) return command === 'doctor' ? { ...result, runtime } : result
+  if (['doctor', 'status'].includes(command)) return { ...compactDiagnosis(result), runtime }
+  if (command === 'check') return { ...result, runtime }
+  let value = result
+  if (result.id?.startsWith('job-')) {
+    const { id, role, action, chapters, scopeRevision, status, agent, directory, promptPath, contextPath, resultPath, archivedIn, archive, output } = result
+    const summary = output?.review ? { path: output.path, review: { id: output.review.id, verdict: output.review.verdict,
+      summary: output.review.summary, chapters: output.review.chapters.map(row => ({ chapter: row.chapter, version: row.version, verdict: P.rowVerdict(output.review, row) })),
+      issues: output.review.issues?.length ?? 0, resolutions: output.review.resolutions?.length ?? 0 } } : output ? {
+      path: output.path, version: output.version, words: output.words, files: output.files, receipt: Boolean(output.receipt || output.receipts?.length),
+      ...(output.receipts ? { registeredChapters: output.receipts.map(row => row.chapter) } : {}) } : undefined
+    value = { id, role, action, chapters, scopeRevision, status, agent, directory, promptPath, contextPath, resultPath, archivedIn, archive, ...(summary ? { output: summary } : {}) }
+  }
+  const diagnose = ['collect', 'scope', 'config'].includes(command) || command === 'task' && flags.status
+  return { ...value, runtime, ...(diagnose ? { diagnosis: compactDiagnosis(await W.diagnose(resolve(argument), await P.load(resolve(argument)))) } : {}) }
+}
 if (process.argv[1] && existsSync(process.argv[1]) && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const result = await run(process.argv.slice(2))
     output(result, typeof result !== 'string')
-    if (process.argv[2] === 'check' && [...(result.tasks ?? []), ...(result.diagnostics ?? [])].some(x => ['configure', 'repair-record', 'repair-reference', 'repair-format', 'repair-length', 'reconcile', 'restore-source', 'reindex-source', 'refresh-evidence', 'resolve-gap', 'repair', 'decision', 'circuit-break', 'exception-decision'].includes(x.type))) process.exitCode = 1
+    if (process.argv[2] === 'check' && [...(result.tasks ?? []), ...(result.diagnostics ?? [])].some(x => !x.historical && ['configure', 'repair-record', 'repair-reference', 'repair-format', 'repair-length', 'reconcile', 'restore-source', 'reindex-source', 'refresh-evidence', 'resolve-gap', 'repair', 'decision', 'circuit-break', 'exception-decision'].includes(x.type))) process.exitCode = 1
   } catch (error) { console.error(`novel: ${error.message}`); process.exitCode = 1 }
 }

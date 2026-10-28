@@ -12,6 +12,8 @@ whenToUse: 用户明确要求使用本插件或主动选择同名小说制作预
 
 ## 先读
 
+Codex宿主仅使用[Codex专用入口](../../adapters/codex/skills/tiancai-novel/SKILL.md)，不叠加以下DSH预设步骤；原生版CLI位于插件根bin，不能由项目有.novel-workshop目录推断其中有程序。DSH继续使用本文件以下流程。
+
 DSH 预设把运行资产同步到 `$DSH_HOME/novel-workshop/`，未设置时为 `~/.dsh/novel-workshop/`。使用其中的 `bin/novel.mjs`、`core/手册.md` 与 `core/自动制作.md`。项目安装版使用 `<项目>/.novel-workshop/` 内同名路径；若直接从本源码使用，读本技能包根目录的 `core/`、`bin/`，不要把技能目录误作运行目录。
 
 队长先读核心流程和已有项目 `00-状态.md`，在DSH调用 `novel_workshop action=doctor`（其他宿主使用CLI的 `doctor <项目> --json`）。子代理先读分配的任务提示与对应 `core/roles/<岗位>.md`，只执行自己的任务。
@@ -30,6 +32,14 @@ DSH 预设把运行资产同步到 `$DSH_HOME/novel-workshop/`，未设置时为
 收到回答以 `config --source "用户原话或明确文档依据"` 保存对应值。缺项未确定时停止依赖它的制作，不先按经验填数。已有确认项不重复问，后续新指令覆盖旧值时记录新依据。
 
 ## 派单与收件
+
+DSH本会话明确scope后，成功collect会自动按当前诊断启动下一岗位，返回continuation时只等待该单完成通知，不重复dispatch或结束等作者催促；未自动启动才执行nextAction.call。自动续作只作用于本会话当前scope，不在scope初次保存时跳过前置资料同步，也不越过configure、作者裁决、导出等动作。scope.options.automatic=false改为手动派单；暂停、只读或中止清除本会话续作状态，获准恢复时重新scope。
+
+复核保存result.json即获得只读预检。issues每项必须含非空text及evidence:{path,quote}，passed的各维grade为A/B并有真实reason；“良好/合格”不能代替字母，程序不替代理抬分。quote用当前稿逐字连续短句，不拼接、省略或补引号，无需整段对白。字段或引文错误保留原单，由原复核代理修同一报告；DSH collect自动回叫原代理，correct-result可恢复，最多3次，不标failed或由队长重建issues。新写作、返修及实质复核仍用独立任务；材料/正文变化则按受影响范围重新审核，不借字段回修绕过。原代理保留自己已验证的完整阅读回执，回修先读prompt/context/岗位卡及原result.json，仅能写result.json；新代理仍须完整读取。
+
+DSH从只读模式恢复先doctor options.inspect=false，再立即scope保存最新操作、范围与来源，之后才执行诊断待办，不先scope撞守卫或先处理旧scope任务。“先登记501—510，再推进至515”保存continue范围501—515，按诊断先finish及独立复核，再继续新章。finish批量读回现稿只补记录，不复制、润色或提交正文补丁，不手填复核通过；写作和返修仍每单一章。
+
+复核每章明确verdict，未受影响的独立通过章保留结论，改稿及直接依赖变化仍需复验；旧报告无逐章判决时不推断通过。篇幅按底本且未设minRatio/maxRatio时，不从历史比例推导95%门槛。排版用format的heading/indent，不重抄整章；计量comparison判断文本差异，字数相同不证明内容相同。无当前作者格式硬要求时，井号/缩进偏好只作建议。
 
 现行分册用config.outlines的path/from/to及source一次绑定适用范围，逐章map仍可覆盖；不逐章重复选择同一册。doctor/collect诊断提供nextAction.call（DSH可直接调用），文档检索按需分页。
 
@@ -51,7 +61,7 @@ DSH 预设把运行资产同步到 `$DSH_HOME/novel-workshop/`，未设置时为
 3. worker先真实read任务提示、context、岗位卡、textFiles及逐章packets与正文视图，用offset/limit分页读完。未读全、工具失败或只有聊天正文不能提交；输入prompt/context/chapters/text只读，结果与辅助产物只写绑定任务目录。宿主在提交result.json时生成独立阅读回执，不能由worker伪造。
 4. 等待宿主完成通知，队长collect收件并串行提交。返回的diagnosis已经是下一步，直接续作，不再重复doctor、prepare或accept。相互依赖的正文每单一章，收件取得真实出章状态后再派下一章；槽位不足先等已有任务完成，不轮询。
 5. 每个任务使用全新worker，文笔和复核身份独立；不复用文笔去自查并冒充独立复核。普通返修也重新派文笔任务，旧版本保留，复核冷读实际新版本。
-6. 工具或材料缺失、任务失败时只把task状态改为failed/cancelled并说明原因，补齐后重新dispatch；不能手填running的agent或接受旧宿主未验证任务。范围缩小时保留仍在范围且依据/权限有效的任务，按scope返回jobs.kept/cancelled处理；暂停或受影响任务仍取消。
+6. 真正工具或材料缺失、执行失败时才把task状态改为failed/cancelled并说明原因；仅复核结果字段或引文错误先按原单回修，不重新冷读整批。真正缺料或执行失败在补齐后重新dispatch；不能手填running的agent或接受旧宿主未验证任务。范围缩小时保留仍在范围且依据/权限有效的任务，按scope返回jobs.kept/cancelled处理；暂停或受影响任务仍取消。
 
 DSH队长只有专用制作、只读材料和必要交互/状态工具，没有shell、直接write/edit、手动subagent/workflow或send_message入口。worker提供read、glob、grep、write、edit及novel_draft计量，不能再次派单或询问作者；每次写入核对真实ID、父会话、当前授权和任务，路径拒绝链接越界。模型与权限继承宿主，不指定额外模型。核心手册实际绝对路径可从doctor.runtime.manual取得，不用原生read猜测~路径。
 
@@ -60,6 +70,8 @@ DSH队长只有专用制作、只读材料和必要交互/状态工具，没有s
 Codex使用项目专用技能及原生子代理，保持CLI入口。上述DSH合并步骤不要求Codex具有novel_workshop工具。ZCode专门适配仍留待后续。
 
 ## 持续制作
+
+复核优先按requiredReads读reviewReadings逐章整合稿和sharedReviewReading共享依据，正文、底本和逐章材料完整保留，不再把packets/textFiles/body中的相同内容各读一遍。旧任务无整合稿时仍按原清单读全。reviewFocus.changedInputs/unchangedInputs只比较正文版本和审阅依据，不代表通过；证据使用正式原稿originalPath，DSH完整阅读回执保持。首稿在文笔任务内集中完成承接、底本笔误、代词动作及时序伤情和重复对白回读，再提取两更并计量，不新增审查岗位或自评表。
 
 目标完成后的收尾由程序分类归档，不派额外整理子代理。最后收件/交付等完成动作会自动处理；接续旧项目若nextAction为archive，直接执行archive后再报告complete。暂停、未完成、仍有未收件任务时保留现场；doctor --inspect只读，不触发整理。
 

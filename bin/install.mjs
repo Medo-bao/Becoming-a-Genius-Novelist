@@ -94,7 +94,10 @@ async function installCodexSkill(projectDir) {
   await mkdir(dest, { recursive: true })
   await cp(join(REPO, 'adapters', 'codex', 'skills', 'tiancai-novel'), dest, { recursive: true, force: true })
   const entry = join(dest, 'SKILL.md')
-  await writeFile(entry, (await readFile(entry, 'utf8')).replaceAll('](../../../../core/', '](../../../.novel-workshop/core/'), 'utf8')
+  const content = (await readFile(entry, 'utf8'))
+    .replaceAll('](../../../../core/', '](../../../.novel-workshop/core/')
+    .replaceAll('../../../../bin/novel.mjs', '../../../.novel-workshop/bin/novel.mjs')
+  await writeFile(entry, content, 'utf8')
   return dest
 }
 

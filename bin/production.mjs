@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile, readdir } from 'node:fs/promises'
 import { join, dirname } from 'node:path'
 import { local, portable, pad, integer, optional, textFile, stamp, optionalStamp, sameStamp, save, discover, scan, registerFiles,
   chapterIds, latest, nextChapter, contract, relevant, lengthInfo, measure, chapterText, sourceSlices, versionValid, evidence,
-  missingParameters, calibrationTarget, repairStreaks, outlineContext, existingOutline, issueBlocks, issueRange } from './project.mjs'
+  missingParameters, calibrationTarget, repairStreaks, outlineContext, existingOutline, issueBlocks, issueRange, rowVerdict } from './project.mjs'
 import { requireJob } from './tasks.mjs'
 import { safePath, managedPath } from './paths.mjs'
 import * as D from './documents.mjs'
@@ -34,9 +34,10 @@ export async function approvals(root, project, options = {}) {
   const approved = new Map(), invalid = []
   const contracts = new Map(), outlineCache = options.outlineCache ?? new Map()
   const verdicts = new Map()
-  for (const review of project.reviews) for (const row of review.chapters) verdicts.set(`${row.chapter}:${row.version}`, review.verdict)
-  for (const review of project.reviews.filter(x => x.verdict === 'passed')) {
+  for (const review of project.reviews) for (const row of review.chapters) verdicts.set(`${row.chapter}:${row.version}`, rowVerdict(review, row))
+  for (const review of project.reviews) {
     for (const row of review.chapters) {
+      if (rowVerdict(review, row) !== 'passed') continue
       if (verdicts.get(`${row.chapter}:${row.version}`) !== 'passed') continue
       const version = project.chapters[row.chapter]?.versions.find(v => v.version === row.version)
       if (!contracts.has(row.chapter)) contracts.set(row.chapter, await contract(root, project, row.chapter, { outlineCache }))
@@ -85,10 +86,15 @@ export async function dueBatch(root, project, approved, options = {}) {
 }
 export async function diagnose(root, project = null) {
   const result = await diagnoseState(root, project)
+  if (project) {
+    result.plan = { start: project.start, end: project.end, positions: project.end - project.start + 1 }
+    result.lengthPolicy = { ...project.length, ...(project.length.type === 'fixed' ? { words: project.words } : {}) }
+  }
   const call = action => {
     if (action.type === 'archive') return { action: 'archive' }
     if (action.type === 'reconcile') return { action: 'doctor', options: { fix: true } }
-    if (['write', 'repair', 'repair-length', 'repair-format', 'finish'].includes(action.type)) return { action: 'dispatch', options: { role: '文笔', action: action.type, chapter: action.chapters[0] } }
+    if (action.type === 'finish') return { action: 'dispatch', options: { role: '文笔', action: 'finish', chapters: action.chapters.slice(0, project.interval) } }
+    if (['write', 'repair', 'repair-length', 'repair-format'].includes(action.type)) return { action: 'dispatch', options: { role: '文笔', action: action.type, chapter: action.chapters[0] } }
     if (action.type === 'review') return { action: 'dispatch', options: { role: '复核', action: 'review', chapters: action.chapters } }
     if (action.type === 'plan') return { action: 'dispatch', options: { role: '主编', action: 'plan' } }
     if (action.type === 'outline') return { action: 'dispatch', options: { role: '剧情', action: 'outline', chapter: action.chapters[0] } }
@@ -141,13 +147,34 @@ async function diagnoseState(root, project = null) {
       current: lastReview.chapters.every(row => row.version === latest(project, row.chapter)?.version && approved.get(row.chapter)?.version === row.version) } : null }
   const documents = D.summary(await D.inventory(root, project, { cache: outlineCache })).targets
   const diagnostics = [], tasks = []
+  const dependents = new Map()
+  for (let chapter = project.scope.from; chapter <= project.scope.to; chapter++) {
+    for (const dependency of new Set([chapter - 1, ...(project.chapters[chapter]?.dependencies ?? [])])) {
+      if (dependency < project.start || dependency >= chapter) continue
+      if (!dependents.has(dependency)) dependents.set(dependency, new Set())
+      dependents.get(dependency).add(chapter)
+    }
+  }
+  const chapterTask = task => {
+    const affectedChapters = [...new Set(task.chapters.flatMap(chapter => [...(dependents.get(chapter) ?? [])]))]
+    if (task.chapters.some(chapter => inScope(project, chapter)) || affectedChapters.length) tasks.push({ ...task, ...(affectedChapters.length ? { affectedChapters } : {}) })
+    else diagnostics.push({ ...task, historical: true, reason: `${task.reason}；授权范围外且不影响本轮依赖，保留待核对，不阻塞当前目标` })
+  }
   const files = await scan(root, project.paths.body, project)
-  for (const material of project.materials.filter(x => x.status === 'active')) if (!existsSync(local(root, material.path))) tasks.push({ type: 'repair-reference', records: [material.id], requiresUser: false, reason: '资料引用失效，查找实际新位置后更新登记或记录停用，不伪造已读' })
+  for (const material of project.materials.filter(x => x.status === 'active')) if (!existsSync(local(root, material.path))) {
+    const relevant = material.to >= project.scope.from && material.from <= project.scope.to
+    ;(relevant ? tasks : diagnostics).push({ type: 'repair-reference', records: [material.id], requiresUser: false, ...(!relevant ? { historical: true } : {}), reason: '资料引用失效，查找实际新位置后更新登记或记录停用，不伪造已读' })
+  }
   const untracked = files.filter(row => !project.chapters[row.chapter]?.versions.some(v => v.path === row.path && v.version === row.version))
-  if (untracked.length) tasks.push({ type: 'reconcile', chapters: [...new Set(untracked.map(r => r.chapter))], requiresUser: false, reason: '发现未登记章稿，先 doctor --fix 登记，不能推断已经验收' })
+  for (const scoped of [true, false]) {
+    const chapters = [...new Set(untracked.filter(row => (inScope(project, row.chapter) || dependents.has(row.chapter)) === scoped).map(row => row.chapter))]
+    if (chapters.length) chapterTask({ type: 'reconcile', chapters, requiresUser: false, reason: '发现未登记章稿，先 doctor --fix 登记，不能推断已经验收' })
+  }
   for (const id of ids) {
     const version = latest(project, id)
-    if (!await versionValid(root, version)) tasks.push({ type: 'repair-record', chapters: [id], requiresUser: false, reason: '章稿被外部修改或缺失，保存为新版本并复验，不覆盖旧记录' })
+    const relevant = inScope(project, id) || dependents.has(id)
+    const valid = relevant ? await versionValid(root, version) : sameStamp(version.stamp, await optionalStamp(local(root, version.path)))
+    if (!valid) chapterTask({ type: 'repair-record', chapters: [id], requiresUser: false, reason: '章稿被外部修改或缺失，核对采用版并复验，不覆盖旧记录或擅改未授权章节' })
     else if (inScope(project, id)) {
       try { await existingOutline(root, project, id, { outlineCache }) } catch (error) {
         if (error.code !== 'DOCUMENT_CHOICE') throw error
@@ -207,13 +234,13 @@ async function diagnoseState(root, project = null) {
   }
   if (project.mode === '改编精修' && !project.requirements.some(x => x.status === 'active')) tasks.push({ type: 'capture-requirements', requiresUser: false, reason: '从现行要求、目标变更与计划中提取有效要求，保留来源和替代关系；不把执行者自述当用户批准' })
   const unfinished = ids.filter(id => inScope(project, id) && !latest(project, id).receipt)
-  if (unfinished.length) tasks.push({ type: 'finish', chapters: unfinished, requiresUser: false, reason: '读取这些章的实际正文，补齐两更和出章状态，再继续' })
+  if (unfinished.length) tasks.push({ type: 'finish', chapters: unfinished, requiresUser: false, reason: '按审查间隔批量读回这些章的当前正文，只补两更和出章状态；不重写或顺带修稿，补登记不等于复核通过' })
   if (tasks.some(task => task.type === 'select-document')) return { title: project.title, scope, documents, ...progress,
     stage: tasks[0].type, diagnostics, tasks, nextAction: tasks[0] }
   const batch = await dueBatch(root, project, approved, { outlineCache })
   if (batch) tasks.push({ type: 'review', ...batch, requiresUser: false, reason: '本批已到复审节点；本轮末尾不足整批也审阅，不补写授权终点以外章节' })
-  const calibration = calibrationTarget(project)
-  if (calibration) tasks.push({ type: 'calibrate', ...calibration, requiresUser: false,
+  const calibration = calibrationTarget(project, approved)
+  if (calibration && !tasks.some(task => ['finish', 'review', 'repair', 'repair-length', 'repair-format'].includes(task.type))) tasks.push({ type: 'calibrate', ...calibration, requiresUser: false,
     reason: '上一批已通过：先核对并更新当前授权内后续细纲、伏笔与事实，用 calibrate 登记复盘结论再开下一批' })
   if (scope.mode === 'continue' && next <= scope.to) {
     const chapter = Math.max(next, scope.from)
@@ -272,12 +299,23 @@ export async function context(root, project, chapter, options = {}) {
   options = { ...options, outlineCache: options.outlineCache ?? new Map() }
   const row = project.chapters[chapter], version = latest(project, chapter)
   const previous = latest(project, chapter - 1)
+  const previousText = previous ? await textFile(local(root, previous.path)) : ''
+  // 只摘取段首时间转场原句供定位，不解释时间关系，也不代替必要的回查。
+  const timeTransitions = previousText.split(/\r?\n/).flatMap((line, index) =>
+    /^(?:第[\d一二三四五六七八九十百零〇两]+天|[次翌]日|翌晨|[\d一二三四五六七八九十百零〇两]+[天日]后|当天|当晚|当夜)/u.test(line.trimStart())
+      ? [{ line: index + 1, quote: line.trim().slice(0, 700), excerpt: true }] : []).slice(-3)
   const sourceIds = row?.sourceIds ?? (project.source?.chapters[chapter] ? [chapter] : [])
   const outlines = await outlineContext(root, project, chapter, options)
   const documents = await D.inventory(root, project, { cache: options.outlineCache })
   const lessons = new Map()
   for (const item of project.experiences.filter(x => x.status === 'active' && x.from <= chapter && x.to >= chapter)) {
     lessons.set(item.id.match(/^E_(\d+)_\d+$/)?.[1] ?? item.id, item)
+  }
+  const dependencies = await contract(root, project, chapter, { outlineContext: outlines })
+  if (project.length.type === 'source') {
+    // 保留内部历史审阅契约的形状，仅去掉给模型看的无效固定字数占位。
+    const { words, ...policy } = dependencies.lengthPolicy
+    dependencies.lengthPolicy = policy
   }
   return { chapter, nextVersion: (version?.version ?? 0) + 1,
     target: local(root, `${project.paths.body}/第${pad(chapter)}章-v${(version?.version ?? 0) + 1}.md`),
@@ -290,18 +328,18 @@ export async function context(root, project, chapter, options = {}) {
     resolvedIssues: project.issues.filter(issue => issue.status === 'resolved' && issue.from <= chapter && issue.to >= chapter)
       .map(({ id, text, resolution, evidence }) => ({ id, text, resolution, evidence })),
     entryState: row?.entryState ?? project.chapters[chapter - 1]?.exitState ?? null,
-    previous: previous ? { path: local(root, previous.path), tail: (await textFile(local(root, previous.path))).slice(-2500) } : null,
+    previous: previous ? { path: local(root, previous.path), tail: previousText.slice(-2500), timeTransitions,
+      readingNote: '时间转场为前章段首原句摘录，尾段不是全章；回指中段事件时对照这些位置，必要时按path和line读相关上下文，不把摘录当自动时间判定。' } : null,
     experience: [...lessons.values()].slice(-8),
     readingPaths: [...new Set([local(root, project.paths.notes), local(root, project.paths.experience),
       ...['style', 'world', 'characters', 'synopsis'].map(kind => documents.targets[kind]).filter(item => item.exists).map(item => local(root, item.path)),
-      ...project.materials.filter(x => x.status === 'active' && x.kind === 'analysis').map(x => local(root, x.path))])],
-    dependencies: await contract(root, project, chapter, { outlineContext: outlines }), diagnosis: options.diagnosis === false ? undefined : (options.report ?? await diagnose(root, project)).nextAction }
+      ...project.materials.filter(x => x.status === 'active' && x.kind === 'analysis' && x.from <= chapter && x.to >= chapter).map(x => local(root, x.path))])],
+    dependencies, diagnosis: options.diagnosis === false ? undefined : (options.report ?? await diagnose(root, project)).nextAction }
 }
-export async function assertWriteReady(root, project, chapter) {
-  const report = await diagnose(root, project)
+export async function assertWriteReady(root, project, chapter, report = null) {
+  report ??= await diagnose(root, project)
   const blocker = (report.tasks ?? []).find(x => x.requiresUser || ['restore-source', 'reindex-source', 'index-source', 'refresh-evidence'].includes(x.type) ||
-    x.type === 'reconcile' && x.chapters.includes(chapter) ||
-    x.type === 'repair-record' && x.chapters.includes(chapter) || x.type === 'calibrate' && chapter >= x.from)
+    ['reconcile', 'repair-record'].includes(x.type) && (x.chapters.includes(chapter) || x.affectedChapters?.includes(chapter)) || x.type === 'calibrate' && chapter >= x.from)
   if (blocker) throw new Error(`先处理 ${blocker.type}：${blocker.reason}`)
   return report
 }
@@ -350,13 +388,13 @@ async function appendReceipt(root, path, marker, body) {
   await mkdir(dirname(full), { recursive: true })
   await writeFile(full, updated, 'utf8')
 }
-export async function finish(root, project, data, taskId = null) {
+export async function finish(root, project, data, taskId = null, report = null) {
   const chapter = integer(data.chapter), version = latest(project, chapter)
   if (!version || !await versionValid(root, version)) throw new Error('章稿缺失或已被外部改动，先核对版本')
   if (!inScope(project, chapter) || !['continue', 'revise'].includes(project.scope.mode)) throw new Error('两更范围不在当前制作授权内；只读审阅不补写两更')
   const job = requireJob(project, taskId, '文笔', chapter, ['write', 'repair', 'repair-length', 'repair-format', 'finish'])
-  if (job.action === 'finish') await assertWriteReady(root, project, chapter)
-  validateReceipt(data)
+  if (job.action === 'finish') await assertWriteReady(root, project, chapter, report)
+  validateReceipt(data, { metadataOnly: job.action === 'finish' })
   const row = project.chapters[chapter]
   row.exitState = data.exitState
   if (data.entities) row.entities = [...new Set([...(row.entities ?? []), ...data.entities])]
@@ -379,7 +417,8 @@ export async function finish(root, project, data, taskId = null) {
   await save(root, project)
   return version.receipt
 }
-export function validateReceipt(data) {
+export function validateReceipt(data, { metadataOnly = false } = {}) {
+  if (metadataOnly && ['text', 'draftFile', 'patches', 'format', 'rewriteReason'].some(key => Object.hasOwn(data, key))) throw new Error('finish只补现稿两更和出章状态，不接收text、draftFile、patches或format；正文改动须另派repair，不能静默忽略补丁')
   if (typeof data.notes !== 'string' || !data.notes.trim() || typeof data.experience !== 'string' || !data.experience.trim() || !data.exitState) throw new Error('finish 需要 notes、experience 和 exitState')
   for (const key of ['entities', 'factIds']) if (data[key] !== undefined && (!Array.isArray(data[key]) || data[key].some(value => typeof value !== 'string' || !value.trim()))) throw new Error(`${key} 必须是非空字符串数组`)
 }
@@ -390,7 +429,7 @@ export async function reviewDraft(root, project, ids, kind = 'batch', options = 
     if (!version) throw new Error(`第${pad(chapter)}章尚未落盘`)
     rows.push({ chapter, version: version.version, path: version.path, stamp: version.stamp,
       contract: await contract(root, project, chapter, { outlineCache }), length: lengthInfo(project, chapter, version.words),
-      outlineComplete: false, requirementsMet: false, logicChecked: false, styleChecked: false, lengthReason: '', evidence: [] })
+      verdict: 'pending', outlineComplete: false, requirementsMet: false, logicChecked: false, styleChecked: false, lengthReason: '', evidence: [] })
   }
   if (kind === 'final' && (rows.length !== project.end - project.start + 1 || nextChapter(project) <= project.end)) throw new Error('全书未完整，不能创建最终验收')
   const data = { kind, verdict: 'pending', chapters: rows, grades: Object.fromEntries(dimensions(project).map(key => [key, { grade: '', reason: '' }])), issues: [],
@@ -403,19 +442,57 @@ export async function reviewDraft(root, project, ids, kind = 'batch', options = 
   await writeFile(path, JSON.stringify(data, null, 2) + '\n', { flag: 'wx' })
   return { path, data }
 }
-export async function submitReview(root, project, data, taskId = null) {
+async function reviewFieldErrors(root, project, data, job) {
+  const errors = [], quotes = [], texts = new Map()
+  const checkQuote = (item, field) => {
+    if (typeof item?.path !== 'string' || typeof item.quote !== 'string' || !item.quote.trim()) errors.push(`${field}需要evidence:{path,quote}，quote为连续原文短句`)
+    else quotes.push({ item, field })
+  }
+  for (const [i, row] of data.chapters.entries()) {
+    if (!Array.isArray(row.evidence) || !row.evidence.length) errors.push(`chapters[${i}].evidence需要本章当前稿的引文数组`)
+    else row.evidence.forEach((item, n) => checkQuote(item, `chapters[${i}].evidence[${n}]`))
+  }
+  if (data.issues !== undefined && !Array.isArray(data.issues)) errors.push('issues需要数组')
+  for (const [i, issue] of (Array.isArray(data.issues) ? data.issues : []).entries()) {
+    if (typeof issue?.text !== 'string' || !issue.text.trim()) errors.push(`issues[${i}].text需要非空文本；把rule/quote/fix等判断保留并合并到text，不用只填分项或标题`)
+    checkQuote(issue?.evidence, `issues[${i}].evidence`)
+  }
+  for (const [i, item] of (Array.isArray(data.resolutions) ? data.resolutions : []).entries()) if (item.status === 'resolved') checkQuote(item.evidence, `resolutions[${i}].evidence`)
+  if (data.verdict === 'passed') for (const dimension of dimensions(project)) {
+    const grade = data.grades?.[dimension]
+    if (!['A', 'B'].includes(grade?.grade) || typeof grade.reason !== 'string' || !grade.reason.trim()) errors.push(`grades.${dimension}需要{grade:"A"或"B",reason:"真实依据"}；不把“良好/合格”当字母，不为过校验提升实质判决`)
+  }
+  const allowed = new Set(job.chapters.map(chapter => latest(project, chapter)?.path).filter(Boolean))
+  for (const { item, field } of quotes) {
+    const path = portable(root, local(root, item.path))
+    if (!allowed.has(path)) continue // 范围与路径由正式校验给出错误，不读取其他文件。
+    if (!texts.has(path)) texts.set(path, await textFile(local(root, path)))
+    if (!texts.get(path).includes(item.quote)) errors.push(`${field}.quote不在当前稿 ${path}：${JSON.stringify(item.quote.slice(0, 140))}；逐字复制连续短句即可，不拼接、省略或补引号，无需引用整段对话`)
+  }
+  return errors
+}
+export async function submitReview(root, project, data, taskId = null, { checkOnly = false } = {}) {
   // 接回1.0.1实测已经生成的警告报告；仍按问题及原有通过检查判断，不丢弃已做的冷读。
   if (data.verdict === 'warned') data = { ...data, originalVerdict: 'warned', verdict: (data.issues ?? []).some(issueBlocks) ? 'rework' : 'passed' }
   if (project.scope.mode === 'pause') throw new Error('当前已暂停，不提交新的审阅结果')
-  if (!['passed', 'rework'].includes(data.verdict) || !data.summary?.trim() || !data.chapters?.length) throw new Error('审阅需要 passed/rework、summary 与逐章记录')
+  if (!['passed', 'rework'].includes(data.verdict) || typeof data.summary !== 'string' || !data.summary.trim() || !Array.isArray(data.chapters) || !data.chapters.length || data.chapters.some(row => !row || typeof row !== 'object')) throw new Error('审阅需要 passed/rework、summary 与逐章记录')
   const job = requireJob(project, taskId, '复核', undefined, ['review', 'final-review'])
   if (data.chapters.length !== job.chapters.length || data.chapters.some(row => !job.chapters.includes(row.chapter))) throw new Error('审阅结果必须完整对应任务单范围')
   if (data.chapters.some(row => latest(project, row.chapter)?.authorAgent === job.agent)) throw new Error('复核子代理必须独立于文笔子代理，不能自审')
   if (new Set(data.chapters.map(x => x.chapter)).size !== data.chapters.length) throw new Error('审阅章节不能重复')
   const kind = job.action === 'final-review' ? 'final' : 'batch'
   if (data.kind !== undefined && data.kind !== kind) throw new Error('审阅 kind 必须与任务动作一致，普通复核不能升级最终验收')
+  if (data.verdict === 'rework' && data.chapters.every(row => row.verdict === 'passed')) throw new Error('整单rework至少有一章明确rework，不能逐章全通过却保留整体返修判决')
+  const fieldErrors = await reviewFieldErrors(root, project, data, job)
+  if (fieldErrors.length) {
+    const error = new Error(`复核结果预检发现${fieldErrors.length}项字段或引文问题（只修原结果，不重派整批冷读）：\n${fieldErrors.slice(0, 20).join('\n')}${fieldErrors.length > 20 ? '\n其余问题修正后继续检查' : ''}`)
+    error.code = 'REVIEW_RESULT_INVALID'; error.problems = fieldErrors
+    throw error
+  }
   const outlineCache = new Map()
   for (const row of data.chapters) {
+    if (row.verdict !== undefined && !['pending', 'passed', 'rework'].includes(row.verdict)) throw new Error('逐章verdict为passed或rework')
+    if (data.verdict === 'passed' && row.verdict === 'rework') throw new Error('通过报告不能含返修章')
     if (kind !== 'final' && !inScope(project, row.chapter)) throw new Error('审阅超出当前授权范围')
     const version = latest(project, row.chapter)
     if (!version || version.version !== row.version || version.path !== row.path || !sameStamp(version.stamp, row.stamp) || !await versionValid(root, version)) throw new Error(`第${pad(row.chapter)}章审阅版本已变化`)
@@ -425,7 +502,7 @@ export async function submitReview(root, project, data, taskId = null) {
       if (portable(root, local(root, item.path)) !== version.path) throw new Error('逐章审阅证据必须来自本章当前版本')
       await evidence(root, item)
     }
-    if (data.verdict === 'passed') {
+    if (data.verdict === 'passed' || row.verdict === 'passed') {
       if (!version.receipt || [row.outlineComplete, row.requirementsMet, row.logicChecked, row.styleChecked].some(value => value !== true)) throw new Error('本章两更或内容审阅尚未完成，检查项必须是布尔 true')
       const length = lengthInfo(project, row.chapter, version.words)
       if (['红', '缺底本'].includes(length.verdict)) throw new Error(`第${pad(row.chapter)}章篇幅不符合用户设置或缺少底本：${JSON.stringify(length)}`)
@@ -472,10 +549,17 @@ export async function submitReview(root, project, data, taskId = null) {
     if (normalizedIssues.some(issueBlocks)) throw new Error('通过报告不能含未处理的阻塞问题')
     if (openIssues(project).some(issue => issueBlocks(issue) && !resolved.has(issue.id) && [...reviewRows.keys()].some(id => id >= issue.from && id <= issue.to))) throw new Error('仍有未关闭阻塞问题，请由独立复核在resolutions中给出新版证据')
   }
+  for (const row of data.chapters.filter(row => row.verdict === 'passed')) {
+    if (normalizedIssues.some(issue => issueBlocks(issue) && issue.from <= row.chapter && issue.to >= row.chapter) ||
+        openIssues(project, row.chapter).some(issue => issueBlocks(issue) && !resolved.has(issue.id))) throw new Error('逐章通过不能含本章或跨章未关闭阻塞问题')
+  }
   const review = { ...data, kind, issues: normalizedIssues,
     resolutions,
-    chapters: data.chapters.map(row => ({ ...row, length: lengthInfo(project, row.chapter, latest(project, row.chapter).words) })),
+    chapters: data.chapters.map(row => ({ ...row, verdict: ['passed', 'rework'].includes(row.verdict) ? row.verdict : data.verdict,
+      length: lengthInfo(project, row.chapter, latest(project, row.chapter).words) })),
     task: job.id, reviewerAgent: job.agent, id: `review-${project.reviews.length + 1}`, time: new Date().toISOString() }
+  if (checkOnly) return { valid: true, verdict: review.verdict, chapters: review.chapters.map(row => ({ chapter: row.chapter, version: row.version, verdict: row.verdict })),
+    issues: review.issues.length, resolutions: resolutions.length }
   project.reviews.push(review)
   for (const item of resolutions.filter(item => item.status === 'resolved')) {
     const issue = project.issues.find(issue => issue.id === item.id)
@@ -488,7 +572,7 @@ export async function submitReview(root, project, data, taskId = null) {
   if (kind === 'final' && data.verdict === 'passed') project.gates[5] = { passed: true, evidence: review.id }
   const path = await managedPath(root, project.paths.reports, `${review.id}.md`)
   await mkdir(dirname(path), { recursive: true })
-  await writeFile(path, `# ${kind === 'final' ? '全书' : '批次'}审阅 · ${review.id}\n\n- 结论：${review.verdict}\n- 时间：${review.time}\n\n${review.summary}\n\n| 章 | 版本 | 正文汉字 | 底本比例 |\n|---|---|---:|---:|\n${review.chapters.map(r => `| ${r.chapter} | v${r.version} | ${r.length.words} | ${r.length.ratio === null ? '—' : (r.length.ratio * 100).toFixed(2) + '%'} |`).join('\n')}\n\n## 评分依据\n\n${Object.entries(review.grades ?? {}).map(([k, v]) => `- ${k}：${v.grade}；${v.reason}`).join('\n')}\n\n## 引文证据\n\n${review.chapters.map(r => `### 第${pad(r.chapter)}章\n${r.evidence.map(e => `- ${e.path}：「${e.quote}」`).join('\n')}`).join('\n\n')}\n`, { flag: 'wx' })
+  await writeFile(path, `# ${kind === 'final' ? '全书' : '批次'}审阅 · ${review.id}\n\n- 结论：${review.verdict}\n- 时间：${review.time}\n\n${review.summary}\n\n| 章 | 版本 | 逐章判决 | 正文汉字 | 底本比例 |\n|---|---|---|---:|---:|\n${review.chapters.map(r => `| ${r.chapter} | v${r.version} | ${r.verdict} | ${r.length.words} | ${r.length.ratio === null ? '—' : (r.length.ratio * 100).toFixed(2) + '%'} |`).join('\n')}\n\n## 评分依据\n\n${Object.entries(review.grades ?? {}).map(([k, v]) => `- ${k}：${v.grade}；${v.reason}`).join('\n')}\n\n## 引文证据\n\n${review.chapters.map(r => `### 第${pad(r.chapter)}章\n${r.evidence.map(e => `- ${e.path}：「${e.quote}」`).join('\n')}`).join('\n\n')}\n`, { flag: 'wx' })
   project.checkpoint = { time: review.time, nextAction: 'doctor', review: review.id, scopeRevision: project.scope.revision }
   await save(root, project)
   return { review, path }

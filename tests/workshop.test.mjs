@@ -158,9 +158,15 @@ function unzip(buffer) {
 }
 
 test('安装可重入；自动发现并接手0号TXT/MD旧稿，保留原文件且按底本计量', async t => {
+  const { sameStamp } = await import('../bin/project.mjs')
+  const pythonStamp = { size: 28093, mtime: 1793026809669.6619 }, nodeStamp = { size: 28093, mtime: 1793026809669.6616 }
+  assert.equal(sameStamp(pythonStamp, nodeStamp), true)
+  assert.equal(sameStamp(pythonStamp, { ...nodeStamp, mtime: nodeStamp.mtime + .01 }), false)
+  assert.equal(sameStamp(pythonStamp, { ...nodeStamp, size: nodeStamp.size + 1 }), false)
+  assert.equal(sameStamp(null, null), false)
   const native = JSON.parse(await readFile(join(ROOT, '.codex-plugin/plugin.json'), 'utf8'))
   assert.equal(native.name, 'tiancai-novel')
-  assert.equal(native.version, '1.0.1')
+  assert.equal(native.version, '1.0.2')
   assert.equal(native.hooks, undefined)
   assert.equal(native.mcpServers, undefined)
   const nativeSkill = join(ROOT, native.skills, 'tiancai-novel')
@@ -187,7 +193,11 @@ test('安装可重入；自动发现并接手0号TXT/MD旧稿，保留原文件�
   const skillDir = join(installed, '.agents/skills/tiancai-novel'), skill = await readFile(join(skillDir, 'SKILL.md'), 'utf8')
   assert.equal(await readFile(join(skillDir, 'agents/openai.yaml'), 'utf8'), await readFile(join(nativeSkill, 'agents/openai.yaml'), 'utf8'))
   for (const match of skill.matchAll(/\]\(([^)]+)\)/g)) assert.ok(existsSync(resolve(skillDir, match[1])))
-  const installedCLI = join(installed, '.novel-workshop/bin/novel.mjs')
+  const entryLink = skill.match(/\[CLI入口\]\(([^)]+)\)/)
+  assert.ok(entryLink, '项目技能明确给出可解析的CLI入口')
+  const installedCLI = resolve(skillDir, entryLink[1])
+  assert.equal(installedCLI, join(installed, '.novel-workshop/bin/novel.mjs'))
+  assert.equal(command(installedCLI, ['doctor', installed, '--compact']).runtime.cli, installedCLI)
   command(installedCLI, ['init', installed, '--start', '0', '--chapters', '3', '--words', '2500', '--interval', '10'])
   assert.deepEqual(command(installedCLI, ['doctor', installed, '--json']).nextAction.missing, ['mode'])
   command(installedCLI, ['config', installed, '--mode', '原创', '--source', '作者已明确原创'])
@@ -236,6 +246,9 @@ test('安装可重入；自动发现并接手0号TXT/MD旧稿，保留原文件�
   cli(legacy, 'import', ['--interval', '10'])
   cli(legacy, 'config', ['--mode', '改编精修', '--length', 'source', '--source', '现行文档明确改编并按对应底本篇幅'])
   const state = await registry(legacy)
+  assert.match(await readFile(join(legacy, '00-状态.md'), 'utf8'), /篇幅政策：按底本场景完整度/)
+  assert.doesNotMatch(await readFile(join(legacy, '00-状态.md'), 'utf8'), /章均字数：4000/)
+  assert.equal(cli(legacy, 'doctor', ['--compact']).lengthPolicy.words, undefined)
   assert.deepEqual(Object.keys(state.chapters), ['0', '1'])
   assert.equal(state.reviews.length, 0)
   assert.equal(state.documents.characters.path, characterPath)
@@ -244,7 +257,11 @@ test('安装可重入；自动发现并接手0号TXT/MD旧稿，保留原文件�
   assert.equal(await readFile(join(body, '000.txt'), 'utf8'), zero)
   assert.equal(cli(legacy, 'prepare', ['--chapter', '1']).length.target, 180)
   assert.equal(cli(legacy, 'prepare', ['--chapter', '2']).length.target, 70)
-  assert.equal(cli(legacy, 'prepare', ['--chapter', '1']).outline.path, join(legacy, 'docs/现行章节细纲.md'))
+  const sourcePacket = cli(legacy, 'prepare', ['--chapter', '1'])
+  assert.equal(sourcePacket.outline.path, join(legacy, 'docs/现行章节细纲.md'))
+  assert.equal(sourcePacket.dependencies.lengthPolicy.words, undefined)
+  const { contract } = await import('../bin/project.mjs')
+  assert.equal((await contract(legacy, await registry(legacy), 1)).lengthPolicy.words, 4000)
   assert.equal(existsSync(join(legacy, '06-细纲/第001章.md')), false)
   await writeFile(join(legacy, 'docs/另一套章节细纲.md'), '# 另一套细纲\n## 第1章\n另一方案。\n## 第2章\n另一方案。')
   assert.match(cli(legacy, 'prepare', ['--chapter', '2'], 1), /多份细纲候选/)
@@ -399,8 +416,13 @@ test('doctor驱动单会话完整循环，自动两更与尾批复审，最新�
   assert.ok(existsSync(archivedJob.resultPath))
   assert.equal(await readFile(join(archivedJob.directory, '完整草稿.md'), 'utf8'), await readFile(join(root, state.chapters['0'].versions[0].path), 'utf8'))
   const archivedContext = JSON.parse(await readFile(archivedJob.contextPath, 'utf8'))
+  assert.equal(archivedContext.runtime.cli, CLI)
   for (const input of archivedContext.requiredReads) assert.ok(existsSync(input.path), input.path)
-  assert.equal(cli(root, 'collect', ['--id', keptJob.id]).status, 'completed')
+  const compactCollected = cli(root, 'collect', ['--id', keptJob.id, '--compact'])
+  assert.equal(compactCollected.status, 'completed')
+  assert.equal(compactCollected.basis, undefined)
+  assert.equal(compactCollected.diagnosis.nextAction.type, 'complete')
+  assert.ok(existsSync(compactCollected.contextPath))
   assert.ok(existsSync(join(root, reference)))
   const archivedMaterial = state.materials.find(item => item.temporary)
   assert.equal(archivedMaterial.status, 'archived')
@@ -409,6 +431,30 @@ test('doctor驱动单会话完整循环，自动两更与尾批复审，最新�
   assert.equal(await readFile(join(outsideArchive, '保留.txt'), 'utf8'), '不能移动外部文件')
   assert.ok(existsSync(join(root, '.novel-workshop/drafts/含链接/外部')))
   const firstArchiveEntries = structuredClone(state.archives[0].entries)
+  const historicalState = await registry(root), manifestPath = join(root, '.novel-workshop/project.json')
+  const originalZeroStamp = structuredClone(historicalState.chapters['0'].versions.at(-1).stamp)
+  historicalState.chapters['0'].versions.at(-1).stamp.mtime -= 1000
+  historicalState.materials.push({ id: 'M-HIST', path: '已移走的旧资料.md', kind: 'analysis', status: 'active', from: 0, to: 0 })
+  await writeFile(manifestPath, JSON.stringify(historicalState))
+  await writeFile(join(root, '.novel-workshop/drafts/历史异常不阻塞归档.md'), '本次临时资料')
+  const narrowedComplete = cli(root, 'scope', ['--mode', 'continue', '--from', '2', '--to', '2', '--source', '作者只完成第2章，保留旧章异常', '--compact'])
+  assert.equal(narrowedComplete.archive.completed, true)
+  assert.equal(narrowedComplete.diagnosis.nextAction.type, 'complete')
+  assert.equal(narrowedComplete.diagnosis.counts.diagnosticTypes['repair-record'], 1)
+  assert.equal(narrowedComplete.diagnosis.counts.diagnosticTypes['repair-reference'], 1)
+  assert.ok(narrowedComplete.diagnosis.diagnostics.every(item => item.historical))
+  assert.equal(cli(root, 'check').nextAction.type, 'complete')
+  assert.ok(!cli(root, 'prepare', ['--chapter', '2']).readingPaths.some(path => path.endsWith('已移走的旧资料.md')))
+  const dependencyState = await registry(root)
+  dependencyState.chapters['0'].versions.at(-1).stamp = originalZeroStamp
+  dependencyState.materials = dependencyState.materials.filter(item => item.id !== 'M-HIST')
+  const originalOneStamp = structuredClone(dependencyState.chapters['1'].versions.at(-1).stamp)
+  dependencyState.chapters['1'].versions.at(-1).stamp.mtime -= 1000
+  await writeFile(manifestPath, JSON.stringify(dependencyState))
+  assert.ok(cli(root, 'doctor').tasks.find(item => item.type === 'repair-record').affectedChapters.includes(2))
+  assert.match(cli(root, 'dispatch', ['--role', '文笔', '--action', 'finish', '--chapter', '2'], 1), /repair-record/)
+  dependencyState.chapters['1'].versions.at(-1).stamp = originalOneStamp
+  await writeFile(manifestPath, JSON.stringify(dependencyState))
   const before = await readFile(join(root, '07-注意事项.md'), 'utf8')
   await finish(root, 2)
   assert.equal(await readFile(join(root, '07-注意事项.md'), 'utf8'), before)
@@ -491,6 +537,8 @@ test('要求/事实变更只使相关审阅失效；问题修复与撤销闭环�
   await writeFile(repair.resultPath, JSON.stringify(patchResult))
   const measured = cli(root, 'draft-check', ['--task', repair.id, '--file', repair.resultPath])
   assert.equal(measured.changeWords, 0)
+  assert.equal(measured.comparison.contentChanged, true)
+  assert.equal(measured.comparison.formatOnly, false)
   await collectResult(root, repair, patchResult)
   state = await registry(root)
   const current = state.chapters['1'].versions.at(-1), currentText = await readFile(join(root, current.path), 'utf8')
@@ -612,22 +660,27 @@ test('要求/事实变更只使相关审阅失效；问题修复与撤销闭环�
   const brokerText = await manuscript(brokerRoot, 1, 'BROKER')
   const parent = { session: { header: { id: 'broker-captain', cwd: brokerRoot } } }
   const live = new Map([[parent.session.header.id, parent]]), children = new Map(), activations = []
-  const brokerTools = new Map()
+  const brokerTools = new Map(), brokerHandlers = new Map(), correctionMessages = []
   const brokerCtx = { ...ctx, agents: { get(id) { return live.get(id) } },
+    on(name, fn) { brokerHandlers.set(name, fn); return () => {} },
     tools: { register(definition) { brokerTools.set(definition.name, definition); return () => {} }, guard() { return () => {} } },
-    workingDirectory: { async ensure() { return brokerRoot } },
+    workingDirectory: { async ensure(agent) { return agent.session.header.cwd } },
     subagents: { resolveMaxDepth(n) { return n }, async startActivation(spec) {
       activations.push(spec)
-      const saved = await registry(brokerRoot), bound = saved.jobs.find(job => job.agent === spec.childId)
+      const saved = await registry(spec.request.cwd), bound = saved.jobs.find(job => job.agent === spec.childId)
       assert.equal(bound.status, 'running'); assert.equal(bound.runtime, 'dsh-worker-v1')
       assert.equal(spec.request.agentPreset, 'tiancai-novel-worker'); assert.equal(spec.request.maxDepth, 1)
-      const childHandlers = new Map(), childTools = new Map(), child = { session: { header: { id: spec.childId, cwd: brokerRoot, origin: 'subagent', parentSession: parent.session.header.id } } }
+      const childHandlers = new Map(), childTools = new Map(), child = { session: { header: { id: spec.childId, cwd: spec.request.cwd, origin: 'subagent', parentSession: parent.session.header.id } } }
       const childCtx = { ...workerCtx, agents: brokerCtx.agents, workingDirectory: brokerCtx.workingDirectory,
         tools: { ...workerCtx.tools, register(definition) { childTools.set(definition.name, definition); return () => {} } },
         on(name, fn) { childHandlers.set(name, fn); return () => {} } }
       live.set(spec.childId, child); children.set(spec.childId, { child, handlers: childHandlers, tools: childTools })
       await hooks.apply(childCtx, { worker: true })
       return { childId: spec.childId }
+    }, async sendMessage(sender, target, content, options) {
+      assert.equal(sender, parent); assert.equal(live.get(target).session.header.parentSession, parent.session.header.id)
+      assert.equal(options.signal.aborted, false)
+      correctionMessages.push({ target, content }); return `correction-${correctionMessages.length}`
     } } }
   await hooks.apply(brokerCtx)
   const workshop = brokerTools.get('novel_workshop'), brokerExec = { agent: parent, signal: new AbortController().signal }
@@ -639,7 +692,7 @@ test('要求/事实变更只使相关审阅失效；问题修复与撤销闭环�
   assert.equal(workshop.parameters.oneOf, undefined)
   assert.ok(workshop.parameters.properties.data.properties.treatment.enum.includes('改写'))
   assert.equal(workshop.parameters.properties.options.properties.gate.type, 'integer')
-  assert.equal(workshop.parameters.properties.action.enum.length, 18)
+  assert.equal(workshop.parameters.properties.action.enum.length, 19)
   assert.match(workshop.parameters.properties.options.description, /doctor:/)
   assert.match(workshop.parameters.properties.data.description, /config:/)
   await assert.rejects(workshop.execute({ action: 'config', data: { length: '按底本场景决定' } }, brokerExec), /length需要对象/)
@@ -664,6 +717,10 @@ test('要求/事实变更只使相关审阅失效；问题修复与撤销闭环�
   // 相对项目路径按会话工作目录解析，而不是宿主进程 cwd。
   const relativeDoctor = await workshop.execute({ action: 'doctor', project: '.' }, brokerExec)
   assert.ok(relativeDoctor.result)
+  assert.equal(relativeDoctor.runtime.cli, CLI)
+  assert.equal(relativeDoctor.runtime.manual, join(ROOT, 'core/手册.md'))
+  assert.ok(relativeDoctor.runtime.protocol.endsWith('派单.md'))
+  assert.ok(relativeDoctor.runtime.automation.endsWith('自动制作.md'))
   const existingDocs = await workshop.execute({ action: 'documents', options: { kind: 'style' } }, brokerExec)
   assert.equal(existingDocs.result.targets.style.path, '04-文风.md')
   const legacyDoctor = await workshop.execute({ action: 'doctor', project: unregisteredProject }, brokerExec)
@@ -681,6 +738,8 @@ test('要求/事实变更只使相关审阅失效；问题修复与撤销闭环�
   assertDshSchema(writer.tools.get('novel_draft').output.schema, 'novel_draft.output.schema')
   assert.equal((await workshop.execute({ action: 'dispatch', project: brokerRoot, options: { role: '文笔', action: 'write', chapter: 1 } }, brokerExec)).waiting, true)
   assert.equal(activations.length, 1)
+  assert.match(activations[0].request.prompt[0].text, /requiredReads/)
+  assert.match(activations[0].request.prompt[0].text, /reviewReadings/)
   const writeExec = { name: 'write', agent: writer.child, arguments: { file_path: started.resultPath } }
   const writeGate = writer.handlers.get('tools/pre-execute')
   assert.equal((await writeGate(writeExec, () => ({ kind: 'allow' }))).kind, 'deny')
@@ -695,7 +754,13 @@ test('要求/事实变更只使相关审阅失效；问题修复与撤销闭环�
     await readMaterial(actor, path)
     const packet = JSON.parse(await readFile(path, 'utf8'))
     for (const item of packet.textFiles ?? []) await readMaterial(actor, item.path)
+    if (packet.reviewReadings?.length) {
+      if (packet.sharedReviewReading) await readMaterial(actor, packet.sharedReviewReading.path)
+      for (const item of packet.reviewReadings) await readMaterial(actor, item.path)
+      return
+    }
     if (packet.manuscript?.path) await readMaterial(actor, packet.manuscript.path)
+    for (const item of packet.manuscripts ?? []) await readMaterial(actor, item.path)
     for (const item of packet.packets ?? []) await readPacket(actor, item.path)
   }
   async function readTask(actor, job) {
@@ -717,7 +782,7 @@ test('要求/事实变更只使相关审阅失效；问题修复与撤销闭环�
   assert.equal((await writer.handlers.get('tools/post-execute')(writeExec, { isError: true }, () => ({ kind: 'accept' }))).additionalContexts, undefined)
   const draftCount = await writer.tools.get('novel_draft').execute({ file_path: started.resultPath }, { agent: writer.child })
   assert.equal(draftCount.words, 101)
-  const narrow = await workshop.execute({ action: 'scope', options: { mode: 'continue', from: 1, to: 1, source: '作者仅缩小终点，保留本章任务' } }, brokerExec)
+  const narrow = await workshop.execute({ action: 'scope', options: { mode: 'continue', from: 1, to: 1, automatic: false, source: '作者仅缩小终点，保留本章任务' } }, brokerExec)
   assert.deepEqual(narrow.result.jobs.kept, [started.id])
   assert.equal(narrow.result.reviseApproved, true)
   const readReceipt = JSON.parse(await readFile(join(brokerRoot, '.novel-workshop/read-receipts', `${started.id}.json`), 'utf8'))
@@ -728,12 +793,28 @@ test('要求/事实变更只使相关审阅失效；问题修复与撤销闭环�
   assert.equal(collected.result.status, 'completed'); assert.equal(collected.diagnosis.nextAction.type, 'review')
   assert.equal(collected.result.basis, undefined)
   assert.equal(collected.result.output.receipt, undefined)
+  await assert.rejects(workshop.execute({ action: 'dispatch', project: brokerRoot, options: { role: '复核', action: 'review', chapters: [1], review: '请给出完整引文' } }, brokerExec), /review仅供calibrate/)
   const reviewStart = await workshop.execute({ action: 'dispatch', project: brokerRoot, options: { role: '复核', action: 'review', chapters: [1] } }, brokerExec)
   const reviewJob = reviewStart.result, reviewer = children.get(reviewJob.agent)
   assert.notEqual(reviewJob.agent, started.agent)
   const reviewExec = { name: 'write', agent: reviewer.child, arguments: { file_path: reviewJob.resultPath } }
   assert.equal((await reviewer.handlers.get('tools/pre-execute')(reviewExec, () => ({ kind: 'allow' }))).kind, 'deny')
+  const bundledContext = JSON.parse(await readFile(reviewJob.contextPath, 'utf8'))
+  assert.equal(bundledContext.reviewReadings.length, 1)
+  await readMaterial(reviewer, reviewJob.promptPath)
+  await readMaterial(reviewer, reviewJob.contextPath)
+  await readMaterial(reviewer, join(ROOT, 'core/roles/复核.md'))
+  for (const item of bundledContext.textFiles ?? []) await readMaterial(reviewer, item.path)
+  if (bundledContext.sharedReviewReading) await readMaterial(reviewer, bundledContext.sharedReviewReading.path)
+  await readMaterial(reviewer, bundledContext.reviewReadings[0].path, 1)
+  const unreadBundle = await reviewer.handlers.get('tools/pre-execute')(reviewExec, () => ({ kind: 'allow' }))
+  assert.equal(unreadBundle.kind, 'deny')
+  assert.ok(unreadBundle.reason.includes(bundledContext.reviewReadings[0].path))
   await readTask(reviewer, reviewJob)
+  const reviewCounts = await reviewer.tools.get('novel_draft').execute({ file_path: bundledContext.reviewReadings[0].path }, { agent: reviewer.child })
+  assert.equal(reviewCounts.words, 101)
+  assert.equal(existsSync(join(brokerRoot, `.novel-workshop/read-receipts/${reviewJob.id}.json`)), false)
+  assert.equal((await reviewer.handlers.get('tools/pre-execute')({ ...reviewExec, arguments: { file_path: bundledContext.reviewReadings[0].path } }, () => ({ kind: 'allow' }))).kind, 'deny')
   const reviewData = JSON.parse(await readFile(reviewJob.contextPath, 'utf8')).reviewDraft.data
   assert.equal(reviewData.chapters[0].contract, undefined)
   assert.equal(reviewData.chapters[0].stamp, undefined)
@@ -746,7 +827,40 @@ test('要求/事实变更只使相关审阅失效；问题修复与撤销闭环�
   }
   reviewData.issues = [{ from: 1, to: 1, severity: 'info', blocking: false, text: '可选建议：后续可调整节奏，不涉及当前逻辑和作者要求。', evidence: { path: actual.path, quote: '唯一正文BROKER_1' } }]
   assert.equal((await reviewer.handlers.get('tools/pre-execute')(reviewExec, () => ({ kind: 'allow' }))).kind, 'allow')
+  // 一次反馈全部字段错误；原单回叫原复核，只修报告，不作废冷读或允许改正文。
+  const brokenReview = structuredClone(reviewData)
+  for (const item of Object.values(brokenReview.grades)) item.grade = '良好'
+  delete brokenReview.issues[0].text; delete brokenReview.issues[0].evidence
+  brokenReview.chapters[0].evidence[0].quote = '不存在的拼接引文'
+  await writeFile(reviewJob.resultPath, JSON.stringify(brokenReview))
+  const beforePreflight = await readFile(join(brokerRoot, '.novel-workshop/project.json'), 'utf8')
+  const rejectedPreflight = await reviewer.handlers.get('tools/post-execute')(reviewExec, { isError: false }, () => ({ kind: 'accept' }))
+  const errors = rejectedPreflight.additionalContexts[0].content[0].text
+  for (const part of ['issues[0].text', 'issues[0].evidence', 'grades.', 'quote不在当前稿']) assert.ok(errors.includes(part), part)
+  assert.match(cli(brokerRoot, 'result-check', ['--task', reviewJob.id], 1), /复核结果预检/)
+  assert.equal(await readFile(join(brokerRoot, '.novel-workshop/project.json'), 'utf8'), beforePreflight)
+  const receiptPath = join(brokerRoot, `.novel-workshop/read-receipts/${reviewJob.id}.json`)
+  const originalReceipt = await readFile(receiptPath, 'utf8'), originalJobCount = (await registry(brokerRoot)).jobs.length
+  const correction = await workshop.execute({ action: 'collect', project: brokerRoot, options: { id: reviewJob.id } }, brokerExec)
+  assert.equal(correction.collected, false); assert.equal(correction.waiting, true)
+  assert.equal(correction.correction.sameAgent, reviewJob.agent)
+  assert.equal(correctionMessages.length, 1); assert.equal(correctionMessages[0].target, reviewJob.agent)
+  assert.match(correctionMessages[0].content[0].text, /保留实质判断/)
+  assert.equal((await registry(brokerRoot)).jobs.length, originalJobCount)
+  assert.equal((await workshop.execute({ action: 'correct-result', project: brokerRoot, options: { id: reviewJob.id } }, brokerExec)).waiting, true)
+  assert.equal(correctionMessages.length, 1)
+  await assert.rejects(workshop.execute({ action: 'task', project: brokerRoot, options: { id: reviewJob.id, status: 'failed', reason: '字段错误' } }, brokerExec), /正在回修结果/)
+  assert.equal((await reviewer.handlers.get('tools/pre-execute')(reviewExec, () => ({ kind: 'allow' }))).kind, 'deny')
+  await readMaterial(reviewer, reviewJob.resultPath)
+  assert.equal((await reviewer.handlers.get('tools/pre-execute')({ ...reviewExec, arguments: { file_path: join(reviewJob.directory, '新草稿.txt') } }, () => ({ kind: 'allow' }))).kind, 'deny')
+  assert.equal((await reviewer.handlers.get('tools/pre-execute')(reviewExec, () => ({ kind: 'allow' }))).kind, 'allow')
   await writeFile(reviewJob.resultPath, JSON.stringify(reviewData))
+  const validPreflight = await reviewer.handlers.get('tools/post-execute')(reviewExec, { isError: false }, () => ({ kind: 'accept' }))
+  assert.match(validPreflight.additionalContexts[0].content[0].text, /复核结果预检通过/)
+  assert.equal(cli(brokerRoot, 'result-check', ['--task', reviewJob.id]).valid, true)
+  assert.equal(await readFile(receiptPath, 'utf8'), originalReceipt)
+  assert.equal((await registry(brokerRoot)).reviews.length, 0)
+  assert.deepEqual((await reviewer.tools.get('novel_draft').execute({ file_path: reviewJob.resultPath }, { agent: reviewer.child })).chapters.map(row => row.words), [101])
   const acceptedReview = await workshop.execute({ action: 'collect', project: brokerRoot, options: { id: reviewJob.id } }, brokerExec)
   assert.equal(acceptedReview.result.status, 'completed')
   assert.equal(acceptedReview.diagnosis.nextAction.type, 'complete')
@@ -762,7 +876,11 @@ test('要求/事实变更只使相关审阅失效；问题修复与撤销闭环�
   assert.equal((await patchGuard({ name: 'write', agent: patchWriter.child, arguments: { file_path: patchContext.manuscript.path } }, () => ({ kind: 'allow' }))).kind, 'deny')
   const patchExec = { name: 'write', agent: patchWriter.child, arguments: { file_path: patchJob.resultPath } }
   assert.equal((await patchGuard(patchExec, () => ({ kind: 'allow' }))).kind, 'allow')
-  await writeFile(patchJob.resultPath, JSON.stringify({ patches: [{ before: '唯一正文BROKER_1', after: '唯一正文PATCHED_1' }], notes: '定点修订', experience: '保留未改段落', exitState: { next: '已到停止点' } }))
+  await writeFile(patchJob.resultPath, JSON.stringify({ format: { heading: 'plain', indent: 'fullwidth' }, notes: '仅排版', experience: '程序处理缩进', exitState: { next: '已到停止点' } }))
+  const formatCount = await patchWriter.tools.get('novel_draft').execute({ file_path: patchJob.resultPath }, { agent: patchWriter.child })
+  assert.equal(formatCount.changeWords, 0)
+  assert.deepEqual(formatCount.comparison, { exactText: false, formatOnly: true, contentChanged: false })
+  await writeFile(patchJob.resultPath, JSON.stringify({ format: { heading: 'plain', indent: 'fullwidth' }, patches: [{ before: '唯一正文BROKER_1', after: '唯一正文PATCHED_1' }], notes: '定点修订', experience: '保留未改段落', exitState: { next: '已到停止点' } }))
   assert.equal((await patchWriter.tools.get('novel_draft').execute({ file_path: patchJob.resultPath }, { agent: patchWriter.child })).changeWords, 0)
   const editExec = { ...patchExec, name: 'edit' }
   assert.equal((await patchGuard(editExec, () => ({ kind: 'allow' }))).kind, 'allow')
@@ -772,11 +890,136 @@ test('要求/事实变更只使相关审阅失效；问题修复与撤销闭环�
   const countedEdit = await patchWriter.handlers.get('tools/post-execute')(editExec, { isError: false }, () => ({ kind: 'accept' }))
   assert.match(countedEdit.additionalContexts[0].content[0].text, /"changeWords":1/)
   assert.equal((await workshop.execute({ action: 'collect', options: { id: patchJob.id } }, brokerExec)).diagnosis.nextAction.type, 'review')
+  const formattedVersion = (await registry(brokerRoot)).chapters['1'].versions.at(-1)
+  const formattedText = await readFile(join(brokerRoot, formattedVersion.path), 'utf8')
+  assert.ok(formattedText.startsWith('第001章'))
+  assert.match(formattedText, /\n　　唯一正文PATCHED_1星/)
   const revokeJob = (await workshop.execute({ action: 'dispatch', options: { role: '文笔', action: 'repair', chapter: 1 } }, brokerExec)).result
   const revoked = await workshop.execute({ action: 'scope', options: { mode: 'continue', from: 1, to: 1,
-    'revise-approved': false, source: '作者明确撤销既有修订授权，取消在跑的修订' } }, brokerExec)
+    automatic: false, 'revise-approved': false, source: '作者明确撤销既有修订授权，取消在跑的修订' } }, brokerExec)
   assert.equal(revoked.result.reviseApproved, false)
   assert.ok(revoked.result.jobs.cancelled.includes(revokeJob.id))
+
+  // 只在本会话当前明确scope后自动接下一岗；重复收件、中止、只读、暂停均不偷跑。
+  const autoRoot = await fixture(t)
+  await newBook(autoRoot, { start: 1, end: 2 })
+  const autoTexts = new Map()
+  for (const chapter of [1, 2]) autoTexts.set(chapter, await manuscript(autoRoot, chapter, 'AUTO'))
+  const scopeArgs = { action: 'scope', project: autoRoot, options: { mode: 'continue', from: 1, to: 2, source: '作者明确本会话完成两章并复核' } }
+  await workshop.execute(scopeArgs, brokerExec)
+  const autoFirst = (await workshop.execute({ action: 'dispatch', project: autoRoot, options: { role: '文笔', action: 'write', chapter: 1 } }, brokerExec)).result
+  async function writeAuto(job) {
+    const actor = children.get(job.agent)
+    await readTask(actor, job)
+    const exec = { name: 'write', agent: actor.child, arguments: { file_path: job.resultPath } }
+    assert.equal((await actor.handlers.get('tools/pre-execute')(exec, () => ({ kind: 'allow' }))).kind, 'allow')
+    await writeFile(job.resultPath, JSON.stringify({ text: await readFile(autoTexts.get(job.chapters[0]), 'utf8'), notes: '实际承接', experience: '保持事件完整', exitState: { next: '继续本轮授权' } }))
+  }
+  await writeAuto(autoFirst)
+  const autoOne = await workshop.execute({ action: 'collect', project: autoRoot, options: { id: autoFirst.id } }, brokerExec)
+  assert.equal(autoOne.result.status, 'completed'); assert.equal(autoOne.continuation.action, 'write')
+  assert.deepEqual(autoOne.continuation.chapters, [2]); assert.notEqual(autoOne.continuation.agent, autoFirst.agent)
+  const activationCount = activations.length
+  assert.equal((await workshop.execute({ action: 'collect', project: autoRoot, options: { id: autoFirst.id } }, brokerExec)).continuation, undefined)
+  assert.equal(activations.length, activationCount)
+  await writeAuto(autoOne.continuation)
+  await brokerHandlers.get('session/event')({ id: parent.session.header.id }, { type: 'turn/end', data: { reason: { kind: 'aborted' } } })
+  const afterAbort = await workshop.execute({ action: 'collect', project: autoRoot, options: { id: autoOne.continuation.id } }, brokerExec)
+  assert.equal(afterAbort.continuation, undefined); assert.equal(afterAbort.diagnosis.nextAction.type, 'review')
+  assert.equal(activations.length, activationCount)
+  const autoReview = (await workshop.execute({ ...afterAbort.diagnosis.nextAction.call, project: autoRoot }, brokerExec)).result
+  const autoReviewer = children.get(autoReview.agent)
+  await readTask(autoReviewer, autoReview)
+  const autoReviewExec = { name: 'write', agent: autoReviewer.child, arguments: { file_path: autoReview.resultPath } }
+  assert.equal((await autoReviewer.handlers.get('tools/pre-execute')(autoReviewExec, () => ({ kind: 'allow' }))).kind, 'allow')
+  const resumed = await workshop.execute(scopeArgs, brokerExec)
+  assert.deepEqual(resumed.result.jobs.kept, [autoReview.id])
+  assert.equal((await registry(autoRoot)).jobs.at(-1).agent, autoReview.agent)
+  await workshop.execute({ action: 'doctor', project: autoRoot, options: { inspect: true } }, brokerExec)
+  await assert.rejects(workshop.execute({ action: 'collect', project: autoRoot, options: { id: autoReview.id } }, brokerExec), /仅确认进度/)
+  await workshop.execute({ action: 'doctor', project: autoRoot, options: { inspect: false } }, brokerExec)
+  const autoReviewData = JSON.parse(await readFile(autoReview.contextPath, 'utf8')).reviewDraft.data
+  autoReviewData.verdict = 'passed'; autoReviewData.summary = '独立完整复核授权的两章。'
+  for (const grade of Object.values(autoReviewData.grades)) { grade.grade = 'B'; grade.reason = '结合实际稿核对完整性与承接。' }
+  for (const row of autoReviewData.chapters) {
+    row.verdict = 'passed'; row.outlineComplete = row.requirementsMet = row.logicChecked = row.styleChecked = true
+    row.evidence = [{ path: row.path, quote: `唯一正文AUTO_${row.chapter}` }]
+  }
+  await writeFile(autoReview.resultPath, JSON.stringify(autoReviewData))
+  const autoComplete = await workshop.execute({ action: 'collect', project: autoRoot, options: { id: autoReview.id } }, brokerExec)
+  assert.equal(autoComplete.diagnosis.nextAction.type, 'complete'); assert.equal(autoComplete.continuation, undefined)
+  await workshop.execute(scopeArgs, brokerExec)
+  const pauseJob = (await workshop.execute({ action: 'dispatch', project: autoRoot, options: { role: '文笔', action: 'repair', chapter: 1 } }, brokerExec)).result
+  const paused = await workshop.execute({ action: 'scope', project: autoRoot, options: { mode: 'pause', source: '作者暂停' } }, brokerExec)
+  assert.ok(paused.result.jobs.cancelled.includes(pauseJob.id))
+  await assert.rejects(workshop.execute({ action: 'collect', project: autoRoot, options: { id: pauseJob.id } }, brokerExec))
+  assert.equal(activations.length, activationCount + 2)
+
+  // 已有稿的批量finish只提取记录；拒绝漏章、漏读和夹带补丁，不抄正文、不伪造通过。
+  const receiptRoot = await fixture(t)
+  await newBook(receiptRoot, { start: 1, end: 3 })
+  const receiptTexts = new Map()
+  for (const chapter of [1, 2]) {
+    const draft = await manuscript(receiptRoot, chapter, 'RECEIPT'), text = await readFile(draft, 'utf8')
+    const path = join(receiptRoot, `09-正文/第${String(chapter).padStart(3, '0')}章-v1.md`)
+    await writeFile(path, text); receiptTexts.set(chapter, { path, text })
+  }
+  cli(receiptRoot, 'doctor', ['--fix'])
+  const beforeFinish = await registry(receiptRoot), finishAction = cli(receiptRoot, 'doctor').nextAction
+  assert.deepEqual(finishAction.call, { action: 'dispatch', options: { role: '文笔', action: 'finish', chapters: [1, 2] } })
+  assert.match(cli(receiptRoot, 'dispatch', ['--role', '文笔', '--action', 'write', '--chapters', '1,2'], 1), /每个写作/)
+  assert.match(cli(receiptRoot, 'dispatch', ['--role', '文笔', '--action', 'finish', '--chapters', '1,3'], 1), /尚无当前稿/)
+  const receiptJob = (await workshop.execute({ ...finishAction.call, project: receiptRoot }, brokerExec)).result
+  const receiptWorker = children.get(receiptJob.agent), receiptContext = JSON.parse(await readFile(receiptJob.contextPath, 'utf8'))
+  assert.deepEqual(receiptContext.manuscripts.map(row => row.chapter), [1, 2])
+  assert.equal(receiptContext.repair, undefined); assert.equal(receiptContext.source, undefined)
+  assert.equal(receiptContext.readingPaths, undefined)
+  for (const row of receiptContext.manuscripts) assert.equal((await readFile(row.path, 'utf8')).replace(/\r/g, ''), receiptTexts.get(row.chapter).text)
+  const receiptExec = { name: 'write', agent: receiptWorker.child, arguments: { file_path: receiptJob.resultPath } }
+  const receiptGate = receiptWorker.handlers.get('tools/pre-execute'), receiptTool = receiptWorker.tools.get('novel_draft')
+  await readMaterial(receiptWorker, receiptJob.promptPath); await readMaterial(receiptWorker, receiptJob.contextPath)
+  await readMaterial(receiptWorker, join(ROOT, 'core/roles/文笔.md'))
+  await readMaterial(receiptWorker, receiptContext.manuscripts[0].path)
+  await readMaterial(receiptWorker, receiptContext.manuscripts[1].path, 1)
+  assert.equal((await receiptGate(receiptExec, () => ({ kind: 'allow' }))).kind, 'deny')
+  await assert.rejects(receiptTool.execute({ file_path: receiptContext.manuscripts[0].path }, { agent: receiptWorker.child }), /尚未完整读取/)
+  await readTask(receiptWorker, receiptJob)
+  assert.equal((await receiptTool.execute({ file_path: receiptContext.manuscripts[0].path }, { agent: receiptWorker.child })).words, 101)
+  assert.equal(existsSync(join(receiptRoot, `.novel-workshop/read-receipts/${receiptJob.id}.json`)), false)
+  assert.equal((await receiptGate({ ...receiptExec, arguments: { file_path: receiptContext.manuscripts[0].path } }, () => ({ kind: 'allow' }))).kind, 'deny')
+  assert.equal((await receiptGate(receiptExec, () => ({ kind: 'allow' }))).kind, 'allow')
+  const receipts = [2, 1].map(chapter => ({ chapter, notes: `第${chapter}章实际记录`, experience: `第${chapter}章实际经验`, exitState: { location: `河岸${chapter}` } }))
+  const beforeReceiptCollect = await readFile(join(receiptRoot, '.novel-workshop/project.json'), 'utf8')
+  await writeFile(receiptJob.resultPath, JSON.stringify({ chapters: [receipts[1]] }))
+  await assert.rejects(workshop.execute({ action: 'collect', project: receiptRoot, options: { id: receiptJob.id } }, brokerExec), /全部章号/)
+  await writeFile(receiptJob.resultPath, JSON.stringify({ chapters: [receipts[1], { ...receipts[0], experience: '' }] }))
+  await assert.rejects(workshop.execute({ action: 'collect', project: receiptRoot, options: { id: receiptJob.id } }, brokerExec), /notes、experience/)
+  await writeFile(receiptJob.resultPath, JSON.stringify({ chapters: [receipts[1], { ...receipts[0], patches: [{ before: '春', after: '秋' }] }] }))
+  const rejectedFinishCount = await receiptWorker.handlers.get('tools/post-execute')(receiptExec, { isError: false }, () => ({ kind: 'accept' }))
+  assert.match(rejectedFinishCount.additionalContexts[0].content[0].text, /finish只补/)
+  await assert.rejects(workshop.execute({ action: 'collect', project: receiptRoot, options: { id: receiptJob.id } }, brokerExec), /不能静默忽略补丁/)
+  assert.equal(await readFile(join(receiptRoot, '.novel-workshop/project.json'), 'utf8'), beforeReceiptCollect)
+  for (const chapter of [1, 2]) assert.equal((await registry(receiptRoot)).chapters[chapter].versions.at(-1).receipt, null)
+  await writeFile(receiptJob.resultPath, JSON.stringify({ chapters: receipts }))
+  const countedFinish = await receiptWorker.handlers.get('tools/post-execute')(receiptExec, { isError: false }, () => ({ kind: 'accept' }))
+  assert.match(countedFinish.additionalContexts[0].content[0].text, /"action":"finish"/)
+  const receiptCount = await receiptTool.execute({ file_path: receiptJob.resultPath }, { agent: receiptWorker.child })
+  assert.deepEqual(receiptCount.chapters.map(row => [row.chapter, row.words, row.changeWords]), [[1, 101, 0], [2, 101, 0]])
+  const receiptCollected = await workshop.execute({ action: 'collect', project: receiptRoot, options: { id: receiptJob.id } }, brokerExec)
+  assert.deepEqual(receiptCollected.result.output.registeredChapters, [1, 2])
+  assert.equal(receiptCollected.diagnosis.nextAction.type, 'review')
+  assert.equal(receiptCollected.diagnosis.latestApproved, 0)
+  const receiptState = await registry(receiptRoot)
+  assert.equal(receiptState.checkpoint.chapter, 2)
+  for (const chapter of [1, 2]) {
+    assert.equal(receiptState.chapters[chapter].versions.length, beforeFinish.chapters[chapter].versions.length)
+    assert.ok(receiptState.chapters[chapter].versions.at(-1).receipt)
+    assert.equal(await readFile(receiptTexts.get(chapter).path, 'utf8'), receiptTexts.get(chapter).text)
+  }
+  assert.deepEqual((await workshop.execute({ action: 'collect', project: receiptRoot, options: { id: receiptJob.id } }, brokerExec)).result.output.registeredChapters, [1, 2])
+  const compactReceipt = cli(receiptRoot, 'collect', ['--id', receiptJob.id, '--compact'])
+  assert.deepEqual(compactReceipt.output.registeredChapters, [1, 2])
+  assert.equal((await registry(receiptRoot)).experiences.length, 2)
   const synced = join(process.env.DSH_HOME, 'novel-workshop/bin/production.mjs')
   for (let attempt = 0; attempt < 100 && !existsSync(synced); attempt++) await new Promise(resolve => setTimeout(resolve, 20))
   assert.ok(existsSync(synced)); assert.deepEqual(warnings, [])
@@ -835,6 +1078,67 @@ test('要求/事实变更只使相关审阅失效；问题修复与撤销闭环�
   cli(multi, 'scope', ['--mode', 'review', '--from', '1', '--to', '3', '--source', '逐章读回，只报告不改稿'])
   await partialReview(2); await partialReview(3)
   assert.equal(cli(multi, 'doctor').nextAction.type, 'complete')
+
+  // 一章返修不推翻其他独立通过章；真正受上游版本影响的直接后章仍须复验。
+  const partial = await fixture(t)
+  await newBook(partial, { start: 1, end: 4 })
+  await payload(partial, 'config', { interval: 3, source: '作者每三章复核' })
+  for (const chapter of [1, 2, 3]) {
+    const path = await manuscript(partial, chapter)
+    if (chapter === 1) {
+      const text = await readFile(path, 'utf8')
+      await writeFile(path, text.replace('\n\n', `\n\n${'a'.repeat(3200)}\n\n第二天清晨。\n\n${'b'.repeat(3200)}\n\n`))
+    }
+    await writeChapter(partial, chapter, path)
+  }
+  const previousAnchor = cli(partial, 'prepare', ['--chapter', '2']).previous
+  assert.doesNotMatch(previousAnchor.tail, /第二天清晨/)
+  assert.match(previousAnchor.timeTransitions[0].quote, /第二天清晨/)
+  assert.ok(previousAnchor.timeTransitions[0].line > 1)
+  const partialDraft = cli(partial, 'accept', ['--chapters', '1,2,3']).data
+  partialDraft.verdict = 'rework'; partialDraft.summary = '第1章动作归属需修正，其余两章独立合格。'
+  for (const grade of Object.values(partialDraft.grades)) { grade.grade = 'C'; grade.reason = '批内有一章需返修，其余章已完成检查。' }
+  for (const row of partialDraft.chapters) {
+    row.verdict = row.chapter === 1 ? 'rework' : 'passed'
+    row.outlineComplete = row.requirementsMet = row.styleChecked = true
+    row.logicChecked = row.chapter !== 1
+    row.evidence = [{ path: row.path, quote: `TOKEN_${row.chapter}` }]
+  }
+  partialDraft.issues = [{ from: 1, to: 1, severity: 'yellow', text: '第1章动作归属需修正', evidence: partialDraft.chapters[0].evidence[0] }]
+  const contradictory = structuredClone(partialDraft)
+  for (const row of contradictory.chapters) { row.verdict = 'passed'; row.logicChecked = true }
+  contradictory.issues = []
+  assert.match(await review(partial, contradictory, 1), /整单rework/)
+  const invalidPartial = structuredClone(partialDraft)
+  invalidPartial.issues[0].to = 3
+  assert.match(await review(partial, invalidPartial, 1), /逐章通过.*跨章/)
+  assert.equal((await registry(partial)).reviews.length, 0)
+  await review(partial, partialDraft)
+  assert.equal(cli(partial, 'doctor').latestApproved, 2)
+  assert.equal(cli(partial, 'doctor').nextAction.type, 'repair')
+  assert.ok(!cli(partial, 'doctor').tasks.some(task => task.type === 'calibrate'))
+  const { repairStreaks } = await import('../bin/project.mjs')
+  assert.deepEqual(repairStreaks({ ...await registry(partial), maxRepairRounds: 1 }), [1])
+  const fixOne = startJob(partial, '文笔', 'repair', ['--chapter', '1'])
+  await collectResult(partial, fixOne, { patches: [{ before: 'TOKEN_1', after: 'FIXED_1' }], notes: '修正第1章', experience: '保留原场景', exitState: { location: '河岸', next: '继续行程' } })
+  const selective = cli(partial, 'doctor')
+  assert.deepEqual(selective.nextAction.chapters, [1, 2])
+  assert.equal(selective.latestApproved, 1)
+  assert.equal(selective.currentChapters.find(row => row.chapter === 3).approved, true)
+  const firstCurrent = (await registry(partial)).chapters['1'].versions.at(-1)
+  await pass(partial, [1, 2], false, [{ id: 'I1', status: 'resolved', resolution: '读回新版，动作归属已修正', evidence: { path: firstCurrent.path, quote: 'FIXED_1' } }])
+  const afterSelective = cli(partial, 'doctor')
+  assert.equal(afterSelective.latestApproved, 3)
+  assert.equal(afterSelective.nextAction.type, 'calibrate')
+  assert.equal(afterSelective.nextAction.from, 4)
+  assert.equal(afterSelective.nextAction.to, 4)
+  await manuscript(partial, 4)
+  await payload(partial, 'calibrate', { outline: [4], note: '前三章按逐章证据完整通过，校准下一章。' })
+  await writeChapter(partial, 4, await manuscript(partial, 4))
+  await pass(partial, [4])
+  assert.equal(cli(partial, 'doctor').nextAction.type, 'complete')
+  assert.equal(cli(partial, 'doctor').latestApproved, 4)
+  assert.equal((await registry(partial)).archives.length, 1)
 })
 
 test('阶段与正式交付分离，四格式同源，Word目录页码和EPUB元数据，原作汇编不混入改编', async t => {
@@ -857,6 +1161,23 @@ test('阶段与正式交付分离，四格式同源，Word目录页码和EPUB元
   assert.equal(reviewContext.prepare, undefined)
   const reviewPacket = JSON.parse(await readFile(reviewContext.packets[0].path, 'utf8'))
   const otherPacket = JSON.parse(await readFile(reviewContext.packets[1].path, 'utf8'))
+  assert.equal(reviewContext.reviewReadings.length, 2)
+  assert.deepEqual(reviewContext.reviewFocus.unchangedInputs, [0, 1])
+  assert.deepEqual(reviewContext.reviewFocus.changedInputs, [])
+  assert.equal(reviewContext.reviewDraft.data.verdict, 'pending')
+  const readingFiles = [...reviewContext.reviewReadings, reviewContext.sharedReviewReading].filter(Boolean)
+  assert.ok(reviewContext.sharedReviewReading)
+  const combinedReading = (await Promise.all(readingFiles.map(item => readFile(item.path, 'utf8')))).join('\n').replace(/\r?\n/g, '')
+  for (const packet of [reviewPacket, otherPacket]) {
+    for (const input of [...packet.textFiles, { path: packet.manuscript.path }]) {
+      const original = (await readFile(input.path, 'utf8')).replace(/\r?\n/g, '')
+      assert.ok(combinedReading.includes(original), `整合稿缺失完整输入：${input.path}`)
+    }
+  }
+  const { requiredInputs } = await import('../bin/tasks.mjs')
+  const required = await requiredInputs(root, (await registry(root)).jobs.find(item => item.id === promoting.id))
+  assert.ok(readingFiles.every(item => required.some(input => input.path === item.path)))
+  assert.ok(!required.some(item => item.path === reviewContext.packets[0].path || item.path === reviewPacket.manuscript.path))
   const outlineView = reviewPacket.textFiles.find(item => item.field === 'outline.text')
   const outlineText = await readFile(outlineView.path, 'utf8')
   assert.match(outlineText, /第0章/); assert.match(outlineText, /第1章/)
@@ -952,6 +1273,17 @@ test('六岗位任务单、执行入口停笔、范围隔离、作者校准及�
     assert.equal(cli(root, 'collect', ['--id', job.id]).status, 'completed')
   }
   assert.ok((await readFile(join(root, '02-人设/人物补充.md'), 'utf8')).startsWith('\uFEFF'))
+  // Codex同岗位复用必须先收旧单；同一执行者不能同时绑定两张任务。
+  const roleAgent = 'codex-character-reuse'
+  const originalJob = cli(root, 'dispatch', ['--role', '人物', '--action', 'plan'])
+  cli(root, 'task', ['--id', originalJob.id, '--status', 'running', '--agent', roleAgent])
+  assert.equal(cli(root, 'task', ['--id', originalJob.id, '--status', 'running', '--agent', roleAgent]).status, 'running')
+  const queuedJob = cli(root, 'dispatch', ['--role', '人物', '--action', 'facts'])
+  assert.match(cli(root, 'task', ['--id', queuedJob.id, '--status', 'running', '--agent', roleAgent], 1), /已有未收件任务/)
+  assert.equal((await registry(root)).jobs.find(job => job.id === queuedJob.id).agent, null)
+  await collectResult(root, originalJob, { summary: '原单完成后再复用同岗位', artifacts: [] })
+  cli(root, 'task', ['--id', queuedJob.id, '--status', 'running', '--agent', roleAgent])
+  await collectResult(root, queuedJob, { summary: '收件后同代理执行下一单', artifacts: [] })
   const outside = await fixture(t)
   await writeFile(join(outside, '外部.md'), '外部文件保持不变')
   let linked = startJob(root, '人物', 'plan')

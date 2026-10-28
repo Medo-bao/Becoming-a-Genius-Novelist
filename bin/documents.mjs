@@ -150,7 +150,8 @@ export async function syncProgress(root, project) {
   const currentReviews = recent.map(id => {
     const version = project.chapters[id].versions.at(-1)
     const match = project.reviews.findLast(item => item.chapters.some(row => row.chapter === id && row.version === version.version))
-    return `${id}-v${version.version}：${!version.receipt ? '缺两更、待独立复核' : match ? `${match.id} ${match.verdict}（有效性以doctor为准）` : '待独立复核'}`
+    const row = match?.chapters.find(row => row.chapter === id && row.version === version.version)
+    return `${id}-v${version.version}：${!version.receipt ? '缺两更、待独立复核' : match ? `${match.id} ${row.verdict ?? match.verdict}（有效性以doctor为准）` : '待独立复核'}`
   })
   const body = `<!-- novel-workshop:progress:start -->\n## 工坊当前进度\n\n此段由制作登记同步；下方原有要求、计划与历史记录保留。\n\n- 当前授权：${project.scope.mode}，${project.scope.from}—${project.scope.to}；依据：${project.scope.source}\n- 实际落盘：${ids.length}个位置；下一空缺章：${next > project.end ? '无' : next}\n- 本轮最新章稿：${recent.map(id => `${id}-v${project.chapters[id].versions.at(-1).version}`).join('、') || '无'}\n- 当前采用稿复核：${currentReviews.join('；') || '无本轮章稿'}\n- 最近历史复核（不代替当前稿）：${review ? `${review.id} ${review.verdict}（${review.chapters.map(row => `${row.chapter}-v${row.version}`).join('、')}）；报告：${project.paths.reports}/${review.id}.md` : '尚无正式复核，不把历史落盘视为通过'}\n- 开放问题：${open.filter(item => item.severity === 'red' || (item.blocking ?? item.severity !== 'info')).length}项阻塞，${open.filter(item => item.severity === 'info' && item.blocking !== true).length}项非阻塞建议\n- 最近经验：${project.experiences.filter(item => item.status === 'active').slice(-3).map(item => item.text).join('；') || '无新增'}\n- 接续：先doctor读取实际状态；${next > project.scope.to ? '已到本轮授权终点，不自动续写下一章' : `下一未写${next}，仍按当前授权完成制作与复核`}\n\n<!-- novel-workshop:progress:end -->`
   for (const name of project.progressFiles) {

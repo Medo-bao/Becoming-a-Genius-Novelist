@@ -27,7 +27,10 @@ export async function stamp(path) {
 export async function optionalStamp(path) {
   try { return await stamp(path) } catch (error) { if (error.code === 'ENOENT') return null; throw error }
 }
-export function sameStamp(a, b) { return a?.size === b?.size && a?.mtime === b?.mtime }
+export function sameStamp(a, b) {
+  // Python与Node将同一纳秒时间转为毫秒浮点数时可能相差一个ULP；容差限于1微秒。
+  return Boolean(a && b) && a.size === b.size && Number.isFinite(a.mtime) && Number.isFinite(b.mtime) && Math.abs(a.mtime - b.mtime) < .001
+}
 export function chapterText(text, fallback = '') {
   const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/)
   const first = lines.findIndex(line => line.trim())
@@ -111,19 +114,21 @@ export function missingParameters(project) {
     length: '篇幅政策：固定章均字数，或按底本场景完整度决定；如有比例限制请说明', interval: '审查间隔：每几章复审（尾批自动复审）' }
   return Object.entries(labels).filter(([key]) => !project.parameters?.[key]?.source).map(([key, question]) => ({ key, question }))
 }
-export function calibrationTarget(project) {
+export const rowVerdict = (review, row) => ['passed', 'rework'].includes(row.verdict) ? row.verdict : review.verdict
+export function calibrationTarget(project, approved) {
   if (project.scope.mode !== 'continue') return null
   const { from, to } = project.scope
-  for (const review of [...project.reviews].reverse()) {
-    if (review.verdict !== 'passed' || review.kind === 'final') continue
-    const covered = review.chapters.map(row => row.chapter).filter(id => id >= from && id <= to)
-    if (!covered.length) continue
-    const done = Math.max(...covered), start = Math.max(from, done + 1), end = Math.min(to, done + project.interval)
-    if (start > end) return null
-    if (project.calibrations.some(x => x.review === review.id && x.scopeRevision === project.scope.revision && x.from === start && x.to === end)) return null
-    return { review: review.id, from: start, to: end }
+  let done = from - 1
+  const certificates = new Set()
+  while (done < to && approved?.has(done + 1) && approved.get(done + 1).version === latest(project, done + 1)?.version) {
+    done++; certificates.add(approved.get(done).review)
   }
-  return null
+  if (done < from || done === to) return null
+  const review = project.reviews.findLast(item => item.kind !== 'final' && certificates.has(item.id))
+  if (!review) return null
+  const start = done + 1, end = Math.min(to, done + project.interval)
+  if (project.calibrations.some(x => x.review === review.id && x.scopeRevision === project.scope.revision && x.from === start && x.to === end)) return null
+  return { review: review.id, from: start, to: end }
 }
 export function repairStreaks(project) {
   const counts = new Map()
@@ -133,7 +138,7 @@ export function repairStreaks(project) {
     const review = project.reviews[i]
     for (const row of review.chapters ?? []) {
       if (row.chapter < project.scope.from || row.chapter > project.scope.to || i < (resets.get(row.chapter) ?? 0)) continue
-      counts.set(row.chapter, review.verdict === 'passed' ? 0 : (counts.get(row.chapter) ?? 0) + 1)
+      counts.set(row.chapter, rowVerdict(review, row) === 'passed' ? 0 : (counts.get(row.chapter) ?? 0) + 1)
     }
   }
   return [...counts].filter(([, count]) => count >= project.maxRepairRounds).map(([chapter]) => chapter).sort((a, b) => a - b)
@@ -151,8 +156,11 @@ export async function save(root, project) {
 export async function views(root, project) {
   const ids = chapterIds(project), next = nextChapter(project)
   const scope = project.scope
+  const lengthPolicy = project.length.type === 'source'
+    ? `- 篇幅政策：按底本场景完整度；${project.length.note || '未规定固定章均字数'}${project.length.minRatio !== null || project.length.maxRatio !== null ? `；明确比例${project.length.minRatio ?? '不限'}—${project.length.maxRatio ?? '不限'}` : ''}`
+    : `- 章均字数：${project.words}`
   const gateRows = [0, 1, 2, 3, 4, 5].map(n => `| G${n} | ${project.gates[n]?.passed ? '通过' : '未通过'} | ${project.gates[n]?.evidence ?? ''} |`)
-  const summary = `# 状态 · ${project.title}\n\n> 由项目登记自动生成，使用 CLI 更新；权威数据：${MANIFEST}。\n\n- 书名：${project.title}\n- 渠道：${project.mode}\n- 章均字数：${project.words}\n- 验收间隔：${project.interval} 章\n- 计划章号：${project.start}—${project.end}（${project.end - project.start + 1} 个位置）\n- 已落盘：${ids.length} 个位置\n- 下一空缺章：${next > project.end ? '无' : next}\n- 当前授权：${scope.mode}，${scope.from}—${scope.to}，版本 ${scope.revision}\n- 授权依据：${scope.source}\n- 待处理问题：${project.issues.filter(x => x.status === 'open').length}\n\n## 阶段门\n\n| 门 | 状态 | 依据 |\n|---|---|---|\n${gateRows.join('\n')}\n\n## 会话交接\n\n${project.checkpoint ? JSON.stringify(project.checkpoint, null, 2) : '启动 doctor 获取下一步；无需重述已登记的要求。'}\n`
+  const summary = `# 状态 · ${project.title}\n\n> 由项目登记自动生成，使用 CLI 更新；权威数据：${MANIFEST}。\n\n- 书名：${project.title}\n- 渠道：${project.mode}\n${lengthPolicy}\n- 验收间隔：${project.interval} 章\n- 计划章号：${project.start}—${project.end}（${project.end - project.start + 1} 个位置）\n- 已落盘：${ids.length} 个位置\n- 下一空缺章：${next > project.end ? '无' : next}\n- 当前授权：${scope.mode}，${scope.from}—${scope.to}，版本 ${scope.revision}\n- 授权依据：${scope.source}\n- 待处理问题：${project.issues.filter(x => x.status === 'open').length}\n\n## 阶段门\n\n| 门 | 状态 | 依据 |\n|---|---|---|\n${gateRows.join('\n')}\n\n## 会话交接\n\n${project.checkpoint ? JSON.stringify(project.checkpoint, null, 2) : '启动 doctor 获取下一步；无需重述已登记的要求。'}\n`
   const lastArchive = project.archives?.at(-1)
   await writeFile(await safePath(root, '00-状态.md'), summary + (lastArchive ? `\n## 过程资料归档\n\n最近归档：[查看归档清单](${lastArchive.index})（${lastArchive.files}个文件）。历史任务用task --id查询归档后的路径。\n` : ''), 'utf8')
   await writeFile(await safePath(root, '.novel-workshop/参数与派单.md'), `# 参数与派单\n\n${['mode', 'plan', 'length', 'interval'].map(key => `- ${key}：${project.parameters?.[key]?.source ? JSON.stringify(project.parameters[key].source) : '未规定，显示的默认值只是占位'}`).join('\n')}\n\n## 未收集任务\n\n${(project.jobs ?? []).filter(x => ['pending', 'running'].includes(x.status)).map(x => `- ${x.id} · ${x.role} · ${x.action} · ${x.status} · ${x.agent ?? '尚未绑定实际子代理'} · ${x.directory}/result.json`).join('\n') || '无'}\n`, 'utf8')
@@ -504,7 +512,7 @@ export async function record(root, project, kind, data) {
  * 批次复盘校准：审阅通过后，把后续细纲/伏笔/事实的调整登记下来。
  * 只有登记过本轮校准，doctor 才允许开下一批。
  */
-export async function prepareCalibration(root, project, data, proposedPaths = []) {
+export async function prepareCalibration(root, project, data, proposedPaths = [], approved) {
   if (!data.note?.trim()) throw new Error('校准需要 note：说明细纲、伏笔与事实怎么调整')
   if (project.scope.mode === 'pause') throw new Error('当前已暂停，不登记新的制作校准')
   let item
@@ -514,7 +522,7 @@ export async function prepareCalibration(root, project, data, proposedPaths = []
     if (chapters.some(n => n < project.scope.from || n > project.scope.to)) throw new Error('恢复章号超出当前授权')
     item = { kind: 'repair-reset', chapters, reviewCount: project.reviews.length }
   } else {
-    const target = calibrationTarget(project)
+    const target = calibrationTarget(project, approved)
     if (!target || data.review && data.review !== target.review) throw new Error('没有匹配当前授权的待校准批次')
     if (!Array.isArray(data.outline) || data.outline.length === 0) throw new Error('校准需要 outline：列出本次核对或更新过的细纲章号')
     const outline = [...new Set(data.outline.map(n => integer(n, '细纲章号')))]
@@ -530,8 +538,8 @@ export async function prepareCalibration(root, project, data, proposedPaths = []
     note: data.note.trim(), source: data.source ?? null, time: new Date().toISOString() }
   return item
 }
-export async function calibrate(root, project, data) {
-  const item = await prepareCalibration(root, project, data)
+export async function calibrate(root, project, data, approved) {
+  const item = await prepareCalibration(root, project, data, [], approved)
   project.calibrations.push(item)
   await save(root, project)
   return item

@@ -1,6 +1,6 @@
 {
   "name": "tiancai-novel",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "仅在明确调用本插件后，由六岗位子代理诊断、制作、复核并交付小说。普通写小说请求不自动触发。",
   "author": { "name": "Medo-bao" },
   "license": "MIT",

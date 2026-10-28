@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto'
-import { resolve, dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { resolve } from 'node:path'
 import { run } from '../../bin/novel.mjs'
+import { runtime } from '../../bin/runtime.mjs'
 import * as P from '../../bin/project.mjs'
 import * as T from '../../bin/tasks.mjs'
 import * as W from '../../bin/production.mjs'
 import { DSH_RUNTIME } from './materials.mjs'
 
-const commands = ['doctor', 'documents', 'init', 'import', 'config', 'scope', 'source', 'gate', 'map', 'record', 'calibrate', 'checkpoint', 'check', 'merge', 'dispatch', 'collect', 'task', 'archive']
+const commands = ['doctor', 'documents', 'init', 'import', 'config', 'scope', 'source', 'gate', 'map', 'record', 'calibrate', 'checkpoint', 'check', 'merge', 'dispatch', 'collect', 'correct-result', 'task', 'archive']
 const readOnly = new Set(['doctor', 'documents', 'check', 'task'])
 const string = { type: 'string' }, number = { type: 'integer', description: '≥0' }, boolean = { type: 'boolean' }
 const list = { type: 'array', items: number, description: '至少一项；空数组不要传' }
@@ -34,6 +34,7 @@ const specs = {
     outline: string, notes: string, experience: string, start: number, end: number, words: number, interval: number, length: choice(['fixed', 'source']), source }) },
   config: { data: config, required: ['data'] },
   scope: { options: object({ mode: choice(['continue', 'review', 'revise', 'pause', 'export']), ...span, source, deliver: boolean, format: string,
+    automatic: { type: 'boolean', description: '默认true，本会话明确scope后，成功collect自动启动诊断给出的下一岗位；false仅手动派单。只读、暂停或中止后不自动续作。' },
     'revise-approved': boolean, interval: { type: 'integer', description: '仅作者明确修改审查间隔时传；普通范围变更不要传' } }, ['mode', 'source']), required: ['options'] },
   source: { options: object({ file: { type: 'string', description: '小说底本，必须含第N章/引子标题；现行要求文件用record保存，不用source' }, encoding: string }, ['file']), required: ['options'] },
   gate: { options: object({ gate: { type: 'integer', enum: [0, 1, 2, 3] }, through: { type: 'integer', enum: [0, 1, 2, 3] },
@@ -49,8 +50,9 @@ const specs = {
   merge: { options: object({ artifact: choice(['adaptation', 'source', 'analysis']), edition: choice(['partial', 'final']), ...span, format: string }) },
   dispatch: { options: object({ role: choice(['主编', '世界', '人物', '剧情', '文笔', '复核']),
     action: choice(['plan', 'capture-requirements', 'decision', 'facts', 'outline', 'map-source', 'calibrate', 'write', 'repair', 'repair-length', 'repair-format', 'finish', 'review', 'final-review']),
-    chapter: number, chapters: list, ...span, review: string }, ['role', 'action']), required: ['options'] },
+    chapter: number, chapters: list, ...span, review: { type: 'string', description: '仅calibrate对应的已登记审阅ID，不是额外提示词' } }, ['role', 'action']), required: ['options'] },
   collect: { options: object({ id: string }, ['id']), required: ['options'] },
+  'correct-result': { options: object({ id: { type: 'string', description: '原running复核任务ID；仅回叫原执行者修结果字段/连续引文，不重派冷读' } }, ['id']), required: ['options'] },
   task: { options: object({ id: string, status: choice(['failed', 'cancelled']), reason: string }) },
   archive: { options: object({ preview: boolean, offset: number, limit: number }) },
 }
@@ -133,8 +135,8 @@ function publicResult(result) {
     ...(archive ? { archive } : {}), ...(archivedIn ? { archivedIn } : {}) }
   if (result.output) {
     const { path, version, length, review } = result.output
-    value.output = { path, version, length, ...(review ? { review: { id: review.id, verdict: review.verdict,
-      chapters: review.chapters.map(row => ({ chapter: row.chapter, version: row.version })), issues: review.issues.length,
+    value.output = { path, version, length, ...(result.output.receipts ? { registeredChapters: result.output.receipts.map(row => row.chapter) } : {}), ...(review ? { review: { id: review.id, verdict: review.verdict,
+      chapters: review.chapters.map(row => ({ chapter: row.chapter, version: row.version, verdict: P.rowVerdict(review, row) })), issues: review.issues.length,
       resolved: review.resolutions?.filter(item => item.status === 'resolved').map(item => item.id) ?? [] } } : {}) }
   }
   return value
@@ -158,7 +160,8 @@ function options(argv, flags) {
 
 export function registerWorkshop(ctx) {
   const inspecting = new WeakSet()
-  ctx.tools.register({
+  const continuing = new WeakMap()
+  const definition = {
     name: 'novel_workshop',
     description: '小说工坊专用入口。仅查资料/确认进度用doctor options.inspect=true，只读汇报不恢复旧任务；明确恢复制作后inspect=false。doctor修复用options.fix=true，不能放根级。documents检索、config绑定已有资料；scope保存真实作者范围；dispatch启动岗位worker，完成后collect续作。',
     parameters,
@@ -182,8 +185,13 @@ export function registerWorkshop(ctx) {
       const mutation = !readOnly.has(args.action) && !preview || args.action === 'doctor' && flags.fix === true || args.action === 'task' && flags.status !== undefined
       if (inspecting.has(parent.session) && mutation) throw new Error('本会话当前仅确认进度，不执行修复登记、scope、派单或收件；待作者明确恢复制作后doctor options.inspect=false，再按真实授权继续')
       const argv = [args.action, root]
-      options(argv, flags)
+      const { automatic, ...scopeFlags } = flags
+      options(argv, args.action === 'scope' ? scopeFlags : flags)
       if (args.action === 'task' && flags.status && !['failed', 'cancelled'].includes(flags.status)) throw new Error('真实执行者由dispatch自动绑定，不能手填或替换agent')
+      if (args.action === 'task' && flags.status === 'failed') {
+        const job = (await P.load(root)).jobs.find(job => job.id === flags.id)
+        if (job?.resultCorrection?.pending) throw new Error('原复核代理正在回修结果，先等完成通知后collect；作者取消时用scope pause或明确cancelled，不把字段回修冒充执行失败')
+      }
       if (args.action === 'dispatch') {
         const project = await P.load(root)
         let job = await T.dispatch(root, project, { ...flags, chapters: flags.chapters === undefined ? undefined : String(flags.chapters).split(',') })
@@ -194,11 +202,12 @@ export function registerWorkshop(ctx) {
         }
         const current = project.jobs.find(item => item.id === job.id), childId = randomUUID()
         current.runtime = DSH_RUNTIME
+        current.parentSession = parent.session.header.id
         await T.updateTask(root, project, { id: job.id, status: 'running', agent: childId })
         try {
           const activation = await ctx.subagents.startActivation({ childId, provider: 'spawn', label: `${job.id} · ${job.role} · ${job.action}`,
             request: { parent, cwd: root, agentPreset: 'tiancai-novel-worker', maxDepth: ctx.subagents.resolveMaxDepth(1),
-              prompt: [{ type: 'text', text: `项目：${root}\n任务已绑定你的真实ID。只完成这一单；实际read以下输入后再写结果，不接受内联材料或在聊天交正文。\npromptPath：${job.promptPath}\ncontextPath：${job.contextPath}\nresultPath：${job.resultPath}\n按任务单及其中岗位卡、textFiles、packets分页完整读取。材料或工具不可用即报告阻塞，不凭记忆补写、不转任复核、不自行接下一章。` }] },
+              prompt: [{ type: 'text', text: `项目：${root}\n任务已绑定你的真实ID。只完成这一单；实际read以下输入后再写结果，不接受内联材料或在聊天交正文。\npromptPath：${job.promptPath}\ncontextPath：${job.contextPath}\nresultPath：${job.resultPath}\n按任务单、岗位卡与context.json的requiredReads完整读取；复核任务优先reviewReadings/sharedReviewReading，不再逐份重复已整合的packets/textFiles。材料或工具不可用即报告阻塞，不凭记忆补写、不转任复核、不自行接下一章。` }] },
             signal: exec.signal, delivery: 'parent' })
           if (activation.childId !== childId) throw new Error('宿主返回的子代理ID与预留绑定不一致')
         } catch (error) {
@@ -207,15 +216,94 @@ export function registerWorkshop(ctx) {
         }
         return jsonValue({ result: publicResult(T.taskInfo(root, current)), waiting: true, instruction: '等待宿主完成通知后collect；不要睡眠轮询、发送追加正文要求或复用本worker写下一章' })
       }
+      if (args.action === 'correct-result') {
+        const project = await P.load(root), job = T.requireJob(project, flags.id, '复核', undefined, ['review', 'final-review'])
+        if (job.runtime !== DSH_RUNTIME || job.parentSession && job.parentSession !== parent.session.header.id) throw new Error('仅原DSH父会话可回叫该复核代理修原单结果，不替换执行者')
+        await T.assertReadReceipt(root, job)
+        await T.assertTaskBasis(root, project, job)
+        if (job.resultCorrection?.pending) return jsonValue({ result: publicResult(T.taskInfo(root, job)), waiting: true, instruction: '原代理已收到结果回修要求，等宿主完成通知后collect，不重复回叫' })
+        let problem
+        try {
+          const checked = await T.inspectResult(root, project, job.id)
+          return jsonValue({ result: publicResult(T.taskInfo(root, job)), checked, recovery: { call: { action: 'collect', project: root, options: { id: job.id } } } })
+        } catch (error) { problem = error.message }
+        const previous = job.resultCorrection, attempts = (previous?.attempts ?? 0) + 1
+        if (attempts > 3) return jsonValue({ result: publicResult(T.taskInfo(root, job)), blocked: true, error: problem, instruction: '本单结果回修已达3次，保留原报告并汇报具体缺口，不伪造通过或循环重派整批冷读' })
+        if (exec.signal?.aborted) throw new Error('当前操作已中止，不回叫复核代理')
+        job.resultCorrection = { attempts, pending: true, error: problem, time: new Date().toISOString() }
+        await P.save(root, project)
+        try {
+          const info = T.taskInfo(root, job)
+          const messageId = await ctx.subagents.sendMessage(parent, job.agent, [{ type: 'text', text:
+            `原单结果回修：${job.id}，项目${root}。你仍是原复核代理，只修自己的result.json字段或引文，不接新章、不写正文、不改主账。\npromptPath：${info.promptPath}\ncontextPath：${info.contextPath}\nresultPath：${info.resultPath}\n本单材料与版本已重新核实，你原有完整阅读回执仍有效。先read原prompt、context、岗位卡与当前result.json；无需重新冷读整批，必要时只回查相关原句。只能写result.json。\n以下为程序校验错误，不是作者新要求：\n${problem}\n按context.resultContract和模板修正；保留实质判断，不为过校验抬分、降级阻塞或伪造通过。若原判决本身矛盾，按已读事实如实报告，不重做全批文学判断。保存后处理宿主预检反馈，完成后返回同一结果路径。` }], { signal: exec.signal })
+          job.resultCorrection.messageId = messageId
+          await P.save(root, project)
+        } catch (error) {
+          if (previous) job.resultCorrection = previous
+          else delete job.resultCorrection
+          await P.save(root, project)
+          throw new Error(`无法回叫原复核代理，原报告已保留：${error.message}`)
+        }
+        return jsonValue({ result: publicResult(T.taskInfo(root, job)), waiting: true, correction: { attempts, sameAgent: job.agent }, instruction: '原复核代理只回修原结果，等完成通知后collect；不取消旧单或新派整批冷读' })
+      }
+      let advance = false
       if (args.action === 'collect') {
         const project = await P.load(root), job = project.jobs.find(item => item.id === flags.id)
         if (!job || job.runtime !== DSH_RUNTIME && job.status !== 'completed') throw new Error('该单未通过当前DSH真实派单入口；保留旧产物，取消旧单后重新dispatch')
+        advance = job.status === 'running' && continuing.get(parent.session)?.get(root) === project.scope.revision
+        if (job.role === '复核' && job.status === 'running') {
+          await T.assertReadReceipt(root, job)
+          await T.assertTaskBasis(root, project, job)
+          try { await T.inspectResult(root, project, job.id) } catch (error) {
+            if (job.resultCorrection?.pending) { job.resultCorrection.pending = false; await P.save(root, project) }
+            if (!exec.signal?.aborted && (!job.parentSession || job.parentSession === parent.session.header.id)) {
+              try {
+                const corrected = await definition.execute({ action: 'correct-result', project: root, options: { id: job.id } }, exec)
+                return jsonValue({ ...corrected, collected: false, error: error.message,
+                  instruction: corrected.waiting ? '原报告未作废，已回叫原复核代理只修同一结果。等其完成通知后collect，不标failed、不另派整批冷读。' : corrected.instruction })
+              } catch (correctionError) {
+                return jsonValue({ result: publicResult(T.taskInfo(root, job)), collected: false, error: error.message, correctionError: correctionError.message,
+                  recovery: { call: { action: 'correct-result', project: root, options: { id: job.id } } }, instruction: '原结果已保留，先处理原代理回修的具体阻塞，不手工重建issues或伪造通过。' })
+              }
+            }
+            return jsonValue({ result: publicResult(T.taskInfo(root, job)), collected: false, error: error.message,
+              recovery: { call: { action: 'correct-result', project: root, options: { id: job.id } } },
+              instruction: '正文与报告尚未正式收件。仅结果字段/连续引文错误，按recovery.call回叫原代理修同一文件；保留本单、原阅读和实质判断，不标failed、不手工重建issues、不重派整批冷读。' })
+          }
+        }
       }
       const result = await run(argv, args.data)
-      if (args.action === 'doctor' && flags.inspect === true) inspecting.add(parent.session)
+      if (args.action === 'doctor' && flags.inspect === true) { inspecting.add(parent.session); continuing.delete(parent.session) }
+      if (args.action === 'scope') {
+        let roots = continuing.get(parent.session)
+        if (!roots) continuing.set(parent.session, roots = new Map())
+        if (automatic !== false && ['continue', 'revise', 'review'].includes(result.mode)) roots.set(root, result.revision)
+        else roots.delete(root)
+      }
       if ((readOnly.has(args.action) || preview) && !(args.action === 'task' && flags.status)) return jsonValue({ result: Array.isArray(result) ? result.map(publicResult) : publicResult(result),
-        ...(args.action === 'doctor' ? { runtime: { manual: join(dirname(fileURLToPath(import.meta.url)), '../../core/手册.md'), protocol: join(dirname(fileURLToPath(import.meta.url)), '../../core/派单.md') } } : {}) })
-      return jsonValue({ result: publicResult(result), diagnosis: await W.diagnose(root, await P.load(root)) })
+        ...(args.action === 'doctor' ? { runtime } : {}) })
+      const diagnosis = await W.diagnose(root, await P.load(root)), next = diagnosis.nextAction
+      if (advance && !exec.signal?.aborted && continuing.get(parent.session)?.get(root) === diagnosis.scope?.revision && !next.requiresUser && next.call?.action === 'dispatch') {
+        try {
+          const started = await definition.execute({ ...next.call, project: root }, exec)
+          return jsonValue({ result: publicResult(result), diagnosis, continuation: started.result, waiting: started.waiting,
+            instruction: '前单已收件，下一岗位已按本会话当前授权自动启动；等continuation的完成通知后collect，不重复派单、不结束为目标完成。' })
+        } catch (error) {
+          return jsonValue({ result: publicResult(result), diagnosis: await W.diagnose(root, await P.load(root)), continuationError: error.message,
+            instruction: '前单已成功收件；下一岗位启动失败，按具体错误恢复，不重复提交前单或冒充完成。' })
+        }
+      }
+      return jsonValue({ result: publicResult(result), diagnosis })
     },
-  })
+  }
+  ctx.tools.register(definition)
+  return (session, event) => {
+    const aborted = event?.type === 'turn/end' && event.data?.reason?.kind === 'aborted'
+    const paused = event?.type === 'goal/change' && event.data?.goal?.phase === 'paused'
+    if (!aborted && !paused) return
+    const agent = ctx.agents.get(session?.id ?? session?.header?.id)
+    if (agent?.session) continuing.delete(agent.session)
+    const owner = ctx.agents.get(agent?.session?.header?.parentSession ?? session?.header?.parentSession)
+    if (owner?.session) continuing.delete(owner.session)
+  }
 }
