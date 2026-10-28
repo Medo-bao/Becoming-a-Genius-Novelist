@@ -8,9 +8,6 @@
   },
   "homepage": "https://github.com/Medo-bao/-#readme",
   "type": "module",
-  "scripts": {
-    "test": "node --test tests/workshop.test.mjs"
-  },
   "engines": {
     "node": ">=18"
   },

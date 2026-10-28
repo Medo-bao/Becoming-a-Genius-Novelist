@@ -49,7 +49,7 @@ node "<运行入口>" doctor "<小说项目>" --compact --json
 
 review 范围只审不改，pause 保持暂停。返修、待裁决破格、熔断和批次校准都受工具入口约束，不以额外派单绕过停笔。每批通过后派剧情子代理核对当前授权内的下一批细纲、伏笔与事实，登记校准再继续。
 
-返修任务直接附本轮manuscript当前稿，默认提交patches定点修改，保留其他场景和已修正确内容；确需整章重写提供rewriteReason。派单时把实际CLI绝对路径传给子代理；文笔保存草稿或result.json后执行`node "<运行入口>" draft-check "<小说项目>" --task TASK_ID --file 任务文件`取得准确汉字数，这不是工程测试。首次独立重写禁止历史旧稿不自动扩大为禁止修订本轮新稿，作者另有明确限制时遵守。
+返修任务直接附本轮manuscript当前稿，默认提交patches定点修改，保留其他场景和已修正确内容；确需整章重写提供rewriteReason。派单时把实际CLI绝对路径传给子代理；文笔保存草稿或result.json后执行`node "<运行入口>" draft-check "<小说项目>" --task TASK_ID --file 任务文件`取得准确汉字数。首次独立重写禁止历史旧稿不自动扩大为禁止修订本轮新稿，作者另有明确限制时遵守。
 
 独立复核verdict仅passed/rework。旧问题在resolutions逐项填open/resolved，resolved必须提供resolution及当前版本真实evidence；collect统一更新问题状态，不再让队长逐项手动关账。红项始终阻塞，黄项默认阻塞，非缺陷的可选建议用info或明确blocking:false并说明理由。已提交返修先局部复验，不重复修待验稿。使用派单的本章与关联细纲切片；相同材料共享读取，不额外通读整册。
 

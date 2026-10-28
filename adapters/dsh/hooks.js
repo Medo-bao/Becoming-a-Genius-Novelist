@@ -63,9 +63,9 @@ const WORKER_RULES = `[小说工坊·岗位任务]
 文笔写作/返修先完成完整稿，再集中修订与计量，不逐句补字追比例；已有完整草稿可用draftFile交稿。finish单只从manuscripts当前正文提取各章记录，不复制正文、不交text/draftFile/patches、不按写作流程重读底本或旧任务；保存result.json由宿主自动计量现稿，任务完成或归档后不要再调用novel_draft，补登记不代表独立复核通过。复核跨章问题用affectedChapters/from/to覆盖全部待改章，contract/stamp由宿主补齐，结论与真实引文仍由你独立给出。
 复核按context.resultContract交字段：issues每项含text和evidence:{path,quote}；passed各维grade用A/B及真实reason，不填“良好”。quote逐字复制连续短句，不拼接或补引号，无需整段对话。保存result.json后先处理宿主预检反馈再结束。原单结果回修只读prompt/context/岗位卡/原result.json，已有完整阅读及依据仍有效时不重读整批，只能改result.json；保留实质判断，不为校验抬分、降级阻塞或伪造通过。
 全部写入必须落在project.json中绑定本session真实ID、当前scope版本且状态为running的任务目录；未绑定、已暂停、旧授权或其他任务目录均不能写。不能修改正式正文、项目登记或其他项目文件。
-不运行CLI、shell或测试，不再委派，不调用控制/交互用户工具。ops_bash、ops_read_files、ops_discover_tools、MCP或其他宿主工具即使出现在工具列表，也不得调用；只使用read、glob、grep、write、edit及novel_draft。工具不可用、read返回空或材料缺失时立即停止并在结果里报告具体缺口，绝不凭记忆补写正文或假装读过材料。完成后返回result.json路径及简要结果，由队长collect。`
+不运行CLI或shell，不再委派，不调用控制/交互用户工具。ops_bash、ops_read_files、ops_discover_tools、MCP或其他宿主工具即使出现在工具列表，也不得调用；只使用read、glob、grep、write、edit及novel_draft。工具不可用、read返回空或材料缺失时立即停止并在结果里报告具体缺口，绝不凭记忆补写正文或假装读过材料。完成后返回result.json路径及简要结果，由队长collect。`
 
-const WORKER_COMPACTION_NOTICE = `[小说工坊·岗位恢复] 压缩已完成。只恢复原岗位任务，重读分配的promptPath、contextPath与岗位卡；写入仍须通过本session真实ID、running状态与当前scope校验。只写自己的任务目录，不运行CLI或测试，不派单、不询问作者。缺少材料或绑定时向队长报告，完成后返回result.json路径。`
+const WORKER_COMPACTION_NOTICE = `[小说工坊·岗位恢复] 压缩已完成。只恢复原岗位任务，重读分配的promptPath、contextPath与岗位卡；写入仍须通过本session真实ID、running状态与当前scope校验。只写自己的任务目录，不运行CLI，不派单、不询问作者。缺少材料或绑定时向队长报告，完成后返回result.json路径。`
 
 const WRITE_TOOLS = new Set(['write', 'edit'])
 const WORKER_TOOLS = new Set(['read', 'glob', 'grep', 'write', 'edit', 'novel_draft'])
@@ -204,7 +204,7 @@ function installWriteGuards(ctx, worker) {
     }] }
   })
   if (worker) ctx.tools.register({
-    name: 'novel_draft', description: '文笔计量本任务草稿、patches/format结果；复核和finish读取本单当前正式稿计量，无须复制正文。排除章题，按Unicode汉字计数；字数相同不证明文本相同，返修另给comparison。result.json保存后宿主自动计量，任务完成后无需再调用。不改主账，不运行测试。',
+    name: 'novel_draft', description: '文笔计量本任务草稿、patches/format结果；复核和finish读取本单当前正式稿计量，无须复制正文。排除章题，按Unicode汉字计数；字数相同不证明文本相同，返修另给comparison。result.json保存后宿主自动计量，任务完成后无需再调用。不改主账。',
     parameters: { type: 'object', additionalProperties: false, required: ['file_path'], properties: { file_path: { type: 'string', description: '本任务草稿或result.json绝对路径；当前稿也可使用本单manuscript/manuscripts或reviewReadings中的正文视图路径' } } },
     output: { schema: { type: 'object', additionalProperties: true }, render(_args, value) { return [{ type: 'text', text: JSON.stringify(value) }] } },
     isConcurrencySafe: () => true,

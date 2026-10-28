@@ -472,7 +472,7 @@ async function reviewFieldErrors(root, project, data, job) {
   return errors
 }
 export async function submitReview(root, project, data, taskId = null, { checkOnly = false } = {}) {
-  // 接回1.0.1实测已经生成的警告报告；仍按问题及原有通过检查判断，不丢弃已做的冷读。
+  // 接回1.0.1已经生成的警告报告；仍按问题及原有通过检查判断，不丢弃已做的冷读。
   if (data.verdict === 'warned') data = { ...data, originalVerdict: 'warned', verdict: (data.issues ?? []).some(issueBlocks) ? 'rework' : 'passed' }
   if (project.scope.mode === 'pause') throw new Error('当前已暂停，不提交新的审阅结果')
   if (!['passed', 'rework'].includes(data.verdict) || typeof data.summary !== 'string' || !data.summary.trim() || !Array.isArray(data.chapters) || !data.chapters.length || data.chapters.some(row => !row || typeof row !== 'object')) throw new Error('审阅需要 passed/rework、summary 与逐章记录')

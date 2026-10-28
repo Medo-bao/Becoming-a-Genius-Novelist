@@ -6,3 +6,5 @@ node_modules/
 !.agents/plugins/marketplace.json
 dist/
 *.tgz
+/tests/
+/实测记录/
