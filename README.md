@@ -60,7 +60,7 @@ $tiancai-novel 自动诊断当前项目，按现有计划继续制作至第30章
 
 首次检查模式、计划章号、篇幅政策、审查间隔是否已有明确来源；已有资料直接沿用，未规定的项集中一次询问并保存。初始化默认值不会静默变成作者要求。
 
-在 DSH 插件管理器安装本地源码目录，再在新会话选择同名预设。
+在 DSH 插件管理器安装本地源码目录，再在新会话选择同名预设。详见 [DSH 工作流](adapters/dsh/skills/tiancai-novel/SKILL.md)。
 
 ```text
 plugin_manager action=install_bundle target="<源码根目录的绝对路径>"

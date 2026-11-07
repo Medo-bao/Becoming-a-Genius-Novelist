@@ -29,7 +29,7 @@
     "adapters/dsh/locale/*.json",
     "adapters/dsh/icon.svg",
     "core",
-    "skills",
+    "adapters/dsh/skills",
     "bin",
     "adapters/codex",
     "adapters/zcode",

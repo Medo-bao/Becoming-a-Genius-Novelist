@@ -12,7 +12,7 @@ whenToUse: 用户明确要求使用本插件或主动选择同名小说制作预
 
 ## 先读
 
-Codex宿主仅使用[Codex专用入口](../../adapters/codex/skills/tiancai-novel/SKILL.md)，ZCode宿主仅使用[ZCode专用入口](../../adapters/zcode/skills/tiancai-novel/SKILL.md)，均不叠加以下DSH预设步骤；原生版CLI位于插件根bin，不能由项目有.novel-workshop目录推断其中有程序。DSH继续使用本文件以下流程。
+Codex宿主仅使用[Codex专用入口](../../../codex/skills/tiancai-novel/SKILL.md)，ZCode宿主仅使用[ZCode专用入口](../../../zcode/skills/tiancai-novel/SKILL.md)，均不叠加以下DSH预设步骤；原生版CLI位于插件根bin，不能由项目有.novel-workshop目录推断其中有程序。DSH继续使用本文件以下流程。
 
 DSH 预设把运行资产同步到 `$DSH_HOME/novel-workshop/`，未设置时为 `~/.dsh/novel-workshop/`。使用其中的 `bin/novel.mjs`、`core/手册.md` 与 `core/自动制作.md`。项目安装版使用 `<项目>/.novel-workshop/` 内同名路径；若直接从本源码使用，读本技能包根目录的 `core/`、`bin/`，不要把技能目录误作运行目录。
 
@@ -32,6 +32,8 @@ DSH 预设把运行资产同步到 `$DSH_HOME/novel-workshop/`，未设置时为
 收到回答以 `config --source "用户原话或明确文档依据"` 保存对应值。缺项未确定时停止依赖它的制作，不先按经验填数。已有确认项不重复问，后续新指令覆盖旧值时记录新依据。
 
 ## 派单与收件
+
+确认原执行者已停止，且结果缺失或 JSON 损坏后，用 novel_workshop 的 advance，options 填原任务 id 与 requeue: true。程序会为未提交部分启动新执行者，原任务和文件保留。
 
 DSH本会话明确scope后，成功collect会自动按当前诊断启动下一岗位，返回continuation时只等待该单完成通知，不重复dispatch或结束等作者催促；未自动启动才执行nextAction.call。自动续作只作用于本会话当前scope，不在scope初次保存时跳过前置资料同步，也不越过configure、作者裁决、导出等动作。scope.options.automatic=false改为手动派单；暂停、只读或中止清除本会话续作状态，获准恢复时重新scope。
 
