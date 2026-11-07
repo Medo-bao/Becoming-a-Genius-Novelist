@@ -48,7 +48,7 @@ DSH的collect内部自动派下一岗属于DSH适配器能力，CLI不能替Code
 
 2026-10-27修复已纳入1.0.2：原生入口优先内置CLI，doctor/context给runtime绝对路径；常用命令加--compact，收件和范围变更直接返回diagnosis.nextAction。全书plan与真实lengthPolicy可直接读取，无关范围外历史异常进入historical诊断，当前章和依赖仍有门禁。明确调用策略保持关闭隐式调用，不以维护插件的请求启动小说制作。
 
-支持原生Codex插件安装，当前版本1.0.3；插件清单位于`.codex-plugin/plugin.json`，本地目录位于`.agents/plugins/marketplace.json`。原生插件载入Codex专用技能和内置CLI，不要求先将技能复制到小说项目。安装只登记插件，不运行doctor、init、import或小说制作。
+支持原生Codex插件安装，当前版本1.0.4；插件清单位于`.codex-plugin/plugin.json`，本地目录位于`.agents/plugins/marketplace.json`。原生插件载入Codex专用技能和内置CLI，不要求先将技能复制到小说项目。安装只登记插件，不运行doctor、init、import或小说制作。
 
 在本地插件包目录注册并安装：
 

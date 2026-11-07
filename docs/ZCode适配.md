@@ -1,6 +1,6 @@
 # ZCode适配
 
-1.0.3 支持 ZCode 原生插件和项目级安装。ZCode 与 Codex 共用技能和 CLI 工作流，队长通过 ZCode 的原生 Agent 与 SendMessage 调度六个岗位。材料、授权范围、版本和复核证据由共享 CLI 核对。
+1.0.4 支持 ZCode 原生插件和项目级安装。ZCode 与 Codex 共用技能和 CLI 工作流，队长通过 ZCode 的原生 Agent 与 SendMessage 调度六个岗位。材料、授权范围、版本和复核证据由共享 CLI 核对。
 
 ## 安装
 
