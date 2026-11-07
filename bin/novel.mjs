@@ -281,7 +281,7 @@ novel <命令> <项目目录> [选项]
   dispatch   六岗建单 --role 主编|世界|剧情|人物|文笔|复核 --action 动作 [--chapter N|--chapters 1,2|--from N --to N]
   task       查询任务；--id ID --status running --agent 实际子代理ID [--runtime codex-native-v1|zcode-native-v1，省略按codex]；failed|cancelled 需要 --reason
   advance    [--id ID] [--reuse|--agent 实际ID] [--context-retained] [--runtime 同上]；收件、诊断、准备及复用绑定合并，仍须原生启动
-             --id ID --requeue；确认原执行者已停止且未交结果后重派（原生运行时通用）
+             --id ID --requeue  确认原执行者已停止且结果缺失或 JSON 损坏后重派（原生运行时通用）
   triage     --source 分流JSON；队长逐项判定处置，不直接改写原报告
   microfix   --source 微修JSON；专用受限补丁，字词须原复核确认
   chapter-commit --task ID --file 当前结果 [--stop-after]；小批次逐章提交

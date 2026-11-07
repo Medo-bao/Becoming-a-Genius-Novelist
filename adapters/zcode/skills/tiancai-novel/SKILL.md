@@ -43,7 +43,7 @@ advance一次完成收件、版本与状态维护、诊断、下一张材料准�
 1. handoff.type=spawn：用Agent工具派全新general-purpose子代理做只读准备，prompt只传任务单ID、项目路径、promptPath/contextPath/resultPath绝对路径及必要作者约束，要求先读这两份材料并回执「已读材料+就绪」，不写任何文件、不自行开工。取得返回的真实agentId后执行`task --id TASK_ID --status running --agent 实际ID --runtime zcode-native-v1 --compact`，成功后用SendMessage向该ID发送绑定成功与开始执行指令，实际唤醒执行。
 2. handoff.type=followup：新单已绑定同批同岗位且旧单已收件的代理，用SendMessage向handoff.agent发送新单的prompt/context/result路径与开始执行指令；SendMessage恢复同一代理且上下文保留，后台执行并在完成时通知。一个代理同时只执行一单，不能跨岗位，复核与文笔始终分离。
 3. 等待语义：唤醒后不轮询不空转，等子代理完成通知；通知未到只表示暂无结果，继续等待，不表示目标完成。收件后执行handoff或nextAction；到complete、作者暂停/取消或真实需要作者输入才结束制作回合。
-4. 恢复时按`doctor.nextAction.jobs[].next`逐单处理。`start`用`task --id TASK_ID`取路径并按第1步绑定；`collect`表示有结果文件或批次已全部提交，照常核验收件；`chapter-commit`先提交已保存的当前章结果。`check-worker`先核对完成通知与TaskOutput(block=false)状态：仍在执行则等候。确认执行者已停止且没交结果后，用`advance "<小说项目>" --id TASK_ID --requeue --compact`按原岗位和未提交章重派，再按返回的`spawn`启动新代理。
+4. 恢复时按`doctor.nextAction.jobs[].next`逐单处理。`start`取任务路径并按第1步绑定。`collect`按常规核验收件，`chapter-commit`先提交已保存的当前章结果。`result-unreadable`先核对文件访问。`check-worker`或`invalid-result`先核对完成通知与TaskOutput(block=false)状态，执行者仍运行时等待或让它修正原结果。确认执行者已停止且结果缺失或 JSON 损坏后，用`advance "<小说项目>" --id TASK_ID --requeue --compact`重派未提交章，保留原单文件，再按返回的`spawn`启动新代理。
 
 收到暂停时停止在途子代理，并执行`scope --mode pause --source <用户暂停指示>`。通过预检且已保存的独立复核结果列在`jobs.paused`，可以在`checkpoint`补记接续说明。恢复时先登记新的明确授权，`jobs.kept`中恢复的复核先收件，其余按诊断派单。
 

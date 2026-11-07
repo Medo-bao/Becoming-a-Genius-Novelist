@@ -198,13 +198,20 @@ export function taskInfo(root, job) {
     resultPath: P.local(root, `${directory}/result.json`), contextPath: P.local(root, `${directory}/context.json`) }
 }
 
-export function taskContinuation(root, job) {
+export async function taskContinuation(root, job) {
   const { id, role, action, chapters, agent, status, resultPath } = taskInfo(root, job)
-  let next = 'check-worker'
-  if (status === 'pending') next = 'start'
-  else if (job.batch && job.committed.length === chapters.length) next = 'collect'
-  else if (existsSync(resultPath)) next = job.batch ? 'chapter-commit' : 'collect'
-  return { id, role, action, chapters, agent, status, result: resultPath, next }
+  const task = { id, role, action, chapters, agent, status, result: resultPath }
+  if (status === 'pending') return { ...task, next: 'start' }
+  if (job.batch && job.committed.length === chapters.length) return { ...task, next: 'collect' }
+  try {
+    const result = await P.jsonFile(await safePath(root, resultPath))
+    if (result && typeof result === 'object' && !Array.isArray(result)) return { ...task, next: job.batch ? 'chapter-commit' : 'collect' }
+    return { ...task, next: 'invalid-result', resultIssue: '结果必须为 JSON 对象' }
+  } catch (error) {
+    if (error.code === 'ENOENT') return { ...task, next: 'check-worker' }
+    if (error instanceof SyntaxError) return { ...task, next: 'invalid-result', resultIssue: '结果 JSON 不完整或无法解析' }
+    return { ...task, next: 'result-unreadable', resultIssue: error.code ?? error.message }
+  }
 }
 async function sharedMaterials(root, project, chapter) {
   const directory = await safePath(root, `.novel-workshop/batches/${batchKey(project, chapter)}/materials`)
@@ -289,7 +296,7 @@ export async function requiredInputs(root, job) {
   await packet(resolve(directory, 'context.json'))
   return [...files.values()]
 }
-export async function dispatch(root, project, data, { replaces } = {}) {
+export async function dispatch(root, project, data, { replaces, replacementReason } = {}) {
   if (!roles[data.role]?.includes(data.action)) throw new Error('任务需要明确六岗位 role 与该岗位支持的 action')
   if (data.review !== undefined && data.action !== 'calibrate') throw new Error('review仅供calibrate填写已登记的审阅ID，不接收额外提示词；复核格式按context.resultContract，不把提示词传进review')
   if (project.scope.mode === 'pause') throw new Error('当前已暂停，不派发新制作任务')
@@ -343,7 +350,7 @@ export async function dispatch(root, project, data, { replaces } = {}) {
   const outlineCache = new Map()
   for (const chapter of chapters) job.basis.push({ chapter, version: P.latest(project, chapter)?.version ?? null, contract: await P.contract(root, project, chapter, { outlineCache }) })
   await prepareTask(root, project, job, { report, calibration })
-  if (replaces) Object.assign(replaces, { status: 'cancelled', replacedBy: id, updated: job.time, reason: '原执行者已停止且未交结果，按当前依据重派' })
+  if (replaces) Object.assign(replaces, { status: 'cancelled', replacedBy: id, updated: job.time, reason: replacementReason })
   project.jobs.push(job)
   await P.save(root, project)
   return taskInfo(root, job)
@@ -360,10 +367,15 @@ export async function requeueInterrupted(root, project, id) {
     throw new Error(`旧单已重派为 ${job.replacedBy}，请核对新单状态`)
   }
   if (job.status !== 'running') throw new Error('只有已绑定的运行中任务可以按中断重派，待启动单可直接绑定')
-  if (taskContinuation(root, job).next !== 'check-worker') throw new Error('本单已有结果或已全部提交，先核验并收件或逐章提交')
+  const { next, resultIssue } = await taskContinuation(root, job)
+  if (next === 'result-unreadable') throw new Error(`本单结果暂无法读取，先核对文件访问：${resultIssue}`)
+  if (next !== 'check-worker' && next !== 'invalid-result') throw new Error('本单已有结果或已全部提交，先核验并收件或逐章提交')
+  const replacementReason = next === 'invalid-result'
+    ? '原执行者已停止，结果 JSON 损坏，保留原单文件并按当前依据重派'
+    : '原执行者已停止且未交结果，按当前依据重派'
   const chapters = job.chapters.filter(chapter => !job.committed?.some(row => row.chapter === chapter))
   return await dispatch(root, project, { role: job.role, action: job.action, chapters, review: job.review ?? undefined,
-    microfix: job.microfix, issueIds: job.triageIssues }, { replaces: job })
+    microfix: job.microfix, issueIds: job.triageIssues }, { replaces: job, replacementReason })
 }
 export async function prepareTask(root, project, job, { report, calibration } = {}) {
   const data = job, chapters = job.batch ? [currentChapter(job)] : job.chapters, id = job.id

@@ -18,7 +18,7 @@
 node bin/install.mjs --target zcode --dir "E:\小说\项目"
 ```
 
-项目技能位于`<项目>/.zcode/skills/tiancai-novel/`，SKILL.md内部链接由安装器改写为本项目`.novel-workshop/bin|core`；调用边界追加到项目`AGENTS.md`自己的标记块，重复安装按标记块幂等替换。安装器同时清理旧版遗留的用户级`~/.zcode/skills/tiancai-novel`通用技能副本——用户级同名技能会遮蔽项目级技能，残留副本仍指向已过时的DSH流程。`--no-skill`仅安装核心与边界规则。升级后需新开聊天加载新技能。
+项目技能位于 `<项目>/.zcode/skills/tiancai-novel/`。安装器改写技能内的 `.novel-workshop` 链接，并按标记块更新项目 `AGENTS.md`。安装完成后，符合本工坊特征的旧用户级技能会整体移入 `~/.zcode/skill-backups/`，安装输出会列出备份位置。设置 `ZCODE_HOME` 时使用该目录下的 `skill-backups/`。`--no-skill` 只安装核心与边界规则。升级后在新聊天加载技能。
 
 ## 只在明确调用时运行
 
@@ -34,7 +34,7 @@ node bin/install.mjs --target zcode --dir "E:\小说\项目"
 | 真实子代理ID | Agent返回的`agent_<uuid>` | `task --id X --status running --agent <ID> --runtime zcode-native-v1` 绑定 |
 | followup_task（唤醒） | `SendMessage`（上下文保留，后台续跑） | 绑定成功后发送开始执行指令；同岗位续单传新路径唤醒 |
 | wait_agent | 完成通知 + `TaskOutput(block=false)` | 通知未到只表示暂无结果；不轮询不空转 |
-| 执行者丢失确认 | 完成通知已到但无result.json | `advance --id X --requeue` 按原岗位和未提交章重派 |
+| 中断结果恢复 | 原代理已停止，结果缺失或 JSON 损坏 | `advance --id X --requeue` 重派未提交章并保留原文件 |
 
 任务单不是模型调用，dispatch成功后仍需真正spawn并绑定返回的子代理标识。绑定纪律与Codex一致：首次spawn只读准备，取得真实ID、`task --status running`绑定成功后才SendMessage通知开始，避免子代理先写结果或计量时任务尚未running；同岗位续单先绑定（advance --reuse完成绑定）再SendMessage唤醒。一个代理同一时间一单，岗位身份独立，复核与文笔始终分离；CLI会拒绝同代理跨岗位、一代理两张未收件单及复核复用文笔执行者。子代理只写隔离任务目录，队长collect串行提交正式产物；正文结果必须来自文笔。流程与JSON结构见[派单协议](../core/派单.md)。
 
@@ -44,7 +44,7 @@ ZCode绑定与复用统一使用`zcode-native-v1`运行时标识：绑定用`tas
 
 ## 恢复与1.0.3语义
 
-- 恢复：ZCode通过技能与CLI恢复，无需DSH钩子。恢复后doctor核对状态与已有任务，按`nextAction.jobs[].next`逐单处理（start绑定、collect收件、chapter-commit逐章提交、check-worker核对通知与TaskOutput状态）；确认执行者已停止且没交结果才requeue，不对未启动单直接collect。压缩后子代理上下文视为丢失，复用确认改用完整材料。
+- 恢复时按 `doctor` 的 `nextAction.jobs[].next` 逐单处理。`start` 用于绑定，`collect` 用于收件，`chapter-commit` 用于逐章提交。`result-unreadable` 需先检查文件访问。`check-worker` 或 `invalid-result` 先核对通知与 TaskOutput 状态。确认原代理已停止且结果缺失或 JSON 损坏后再重派。压缩后用完整材料恢复阅读。
 - 小批次写作：默认2—3章/单，文笔子代理在自身回合内用Bash运行chapter-commit逐章提交并读取下一章新材料，上下文不足用--stop-after在章边界结束；队长只在批次全部提交后advance收件，后章失败、暂停或终点缩小不撤销已保存章。
 - 串行提交：chapter-commit与scope变更共用提交锁；收到「当前项目仍在提交上一项制作操作」时在章边界重试，不直接写project.json。
 - 队长分流与受限微修：复核有问题先triage，明确微修只走microfix专用入口；复核子代理保存result.json后自己用Bash运行result-check预检，字段/引文错误由原代理修同一报告（最多3次），正式提交仍由队长collect。

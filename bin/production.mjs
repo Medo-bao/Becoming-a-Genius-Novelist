@@ -313,8 +313,8 @@ async function diagnoseState(root, project = null) {
     nextAction = { type: 'archive', requiresUser: false, reason: '当前目标已完成，自动分类归档过程资料后结束；正式文件与当前引用保留原位' }
   }
   const active = (project.jobs ?? []).filter(x => ['pending', 'running'].includes(x.status) && x.scopeRevision === scope.revision)
-  if (active.length && !tasks.some(x => x.requiresUser)) nextAction = { type: 'collect', jobs: active.map(job => taskContinuation(root, job)),
-    requiresUser: false, reason: '按每张单的 next 启动、核验收件、逐章提交或确认原生执行者状态' }
+  if (active.length && !tasks.some(x => x.requiresUser)) nextAction = { type: 'collect', jobs: await Promise.all(active.map(job => taskContinuation(root, job))),
+    requiresUser: false, reason: '按每张单的 next 启动、收件、提交章节、核对结果文件或确认执行者状态' }
   return { title: project.title, stage: nextAction.type, written: ids.length, planned: project.end - project.start + 1,
     nextChapter: next, latestApproved: ids.filter(id => approved.get(id)?.version === latest(project, id).version).length,
     scope, documents, ...progress, archive: project.archives?.at(-1) ? { index: project.archives.at(-1).index, files: project.archives.at(-1).files } : null,

@@ -43,10 +43,10 @@ codex plugin add tiancai-novel@tiancai-novel-local
 node bin/install.mjs --target codex --dir "E:\小说\新书"
 ```
 
-可下载 [v1.0.3 源码归档](https://github.com/Medo-bao/Becoming-a-Genius-Novelist/releases/tag/v1.0.3)，也可使用 Git 获取源码。
+使用 Git 获取主分支上的修复。已正式发布的版本可从 [Release 页面](https://github.com/Medo-bao/Becoming-a-Genius-Novelist/releases) 下载。
 
 ```powershell
-git clone --branch v1.0.3 https://github.com/Medo-bao/Becoming-a-Genius-Novelist.git tiancai-novel
+git clone https://github.com/Medo-bao/Becoming-a-Genius-Novelist.git tiancai-novel
 cd tiancai-novel
 ```
 

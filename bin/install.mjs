@@ -10,15 +10,17 @@
  *   1. 复制 core/ 与全部运行模块到 <项目>/.novel-workshop/
  *   2. 把 adapters/<宿主>/AGENTS.md 追加到 <项目>/AGENTS.md（带标记，可重复执行）
  *   3. target=codex 时安装项目级 .agents/skills/tiancai-novel/；target=zcode 时安装
- *      项目级 .zcode/skills/tiancai-novel/，两者均改写 SKILL.md 内部链接；清理用户级残留前
- *      先校验 SKILL.md 含本工坊特征，非本工坊安装的同名目录不动。
+ *      项目级 .zcode/skills/tiancai-novel/，两者均改写 SKILL.md 内部链接。
+ *      用户级旧技能符合本工坊特征时，整体迁入备份目录。
  */
 
 import { existsSync } from 'node:fs'
-import { copyFile, cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { copyFile, cp, mkdir, readFile, readdir, realpath, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { inside, safePath } from './paths.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO = resolve(HERE, '..')
@@ -95,21 +97,25 @@ async function installSkillFrom(host, dest) {
 }
 
 async function installZcodeSkill(projectDir) {
+  const dest = await installSkillFrom('zcode', join(projectDir, '.zcode', 'skills', 'tiancai-novel'))
   const notes = []
   const zcodeHome = process.env.ZCODE_HOME?.trim() || join(homedir(), '.zcode')
-  const stale = join(zcodeHome, 'skills', 'tiancai-novel')
-  if (existsSync(stale)) {
-    const entry = join(stale, 'SKILL.md')
-    const content = existsSync(entry) ? await readFile(entry, 'utf8').catch(() => '') : ''
-    const ours = content.includes('name: tiancai-novel') && content.includes('novel.mjs') && content.includes('手册.md')
-    if (ours) {
-      await rm(stale, { recursive: true, force: true })
-      notes.push(`已清理旧的用户级技能残留：${stale}（避免遮蔽项目级同名技能）`)
-    } else {
-      notes.push(`用户级存在同名技能但不含本工坊特征，未删除：${stale}（如确认是残留请手动处理）`)
-    }
+  if (!existsSync(join(zcodeHome, 'skills', 'tiancai-novel'))) return { dest, notes }
+  const userRoot = await realpath(zcodeHome)
+  const stale = await safePath(userRoot, 'skills/tiancai-novel')
+  if (inside(stale, await realpath(dest))) return { dest, notes }
+  const entry = join(stale, 'SKILL.md')
+  const content = existsSync(entry) ? await readFile(entry, 'utf8').catch(() => '') : ''
+  if (content.includes('name: tiancai-novel') && content.includes('novel.mjs') && content.includes('手册.md')) {
+    const backupRoot = await safePath(userRoot, 'skill-backups')
+    await mkdir(backupRoot, { recursive: true })
+    const backup = await safePath(userRoot, join(backupRoot, `tiancai-novel-${randomUUID()}`))
+    await rename(stale, backup)
+    notes.push(`旧用户级技能已完整备份到 ${backup}`)
+  } else {
+    notes.push(`已保留用户级同名技能 ${stale}，请核对其与项目级技能的优先顺序`)
   }
-  return { dest: await installSkillFrom('zcode', join(projectDir, '.zcode', 'skills', 'tiancai-novel')), notes }
+  return { dest, notes }
 }
 
 const installCodexSkill = projectDir => installSkillFrom('codex', join(projectDir, '.agents', 'skills', 'tiancai-novel'))

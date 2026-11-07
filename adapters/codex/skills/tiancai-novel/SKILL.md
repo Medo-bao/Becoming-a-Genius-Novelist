@@ -42,7 +42,7 @@ advance一次完成收件、版本与状态维护、诊断、下一张材料准�
 
 1. handoff.type=spawn：原生spawn只读准备，支持fork_turns时用none，只传项目、prompt/context/result路径及必要作者约束。明确尚未绑定，不写结果、不自行轮询。取得实际ID后执行`task --id TASK_ID --status running --agent 实际ID --compact`，成功后用原生followup_task确认开始。
 2. handoff.type=followup：新单已绑定同批同岗位且旧单已收件的代理，实际调用能唤醒执行的followup_task，传完整新路径。send_message只给运行中代理追加信息，不能冒充唤醒。一个代理同时只执行一单，不能跨岗位，复核与文笔始终分离。
-3. 恢复时按`doctor.nextAction.jobs[].next`逐单处理。`start`用`task --id TASK_ID`取路径并按第1步绑定；`collect`表示有结果文件或批次已全部提交，照常核验收件；`chapter-commit`先提交已保存的当前章结果。`check-worker`先用原生代理状态核对执行者，仍运行则等候。确认原执行者已停止且没交结果后，用`advance "<小说项目>" --id TASK_ID --requeue --compact`按原岗位和未提交章重派，再按返回的`spawn`启动新代理。
+3. 恢复时按`doctor.nextAction.jobs[].next`逐单处理。`start`取任务路径并按第1步绑定。`collect`按常规核验收件，`chapter-commit`先提交已保存的当前章结果。`result-unreadable`先核对文件访问。`check-worker`或`invalid-result`先核对原生代理状态，执行者仍运行时等待或让它修正原结果。确认执行者已停止且结果缺失或 JSON 损坏后，用`advance "<小说项目>" --id TASK_ID --requeue --compact`重派未提交章，保留原单文件，再按返回的`spawn`启动新代理。
 4. wait_agent采用60000毫秒；等待超时只表示暂无结果，继续等待收件，不表示目标完成。收件后执行handoff或nextAction；到complete、作者暂停/取消或真实需要作者输入才结束制作回合。
 
 收到暂停时停止在途代理，并执行`scope --mode pause --source <用户暂停指示>`。通过预检且已保存的独立复核结果列在`jobs.paused`，可以在`checkpoint`补记接续说明。恢复时先登记新的明确授权，`jobs.kept`中恢复的复核先收件，其余按诊断派单。
