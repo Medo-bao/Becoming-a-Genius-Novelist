@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { mkdir, writeFile, readFile } from 'node:fs/promises'
+import { mkdir, writeFile, readFile, readdir } from 'node:fs/promises'
 import { resolve, relative, isAbsolute, dirname, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as P from './project.mjs'
@@ -14,20 +14,21 @@ const roles = {
   剧情: ['plan', 'outline', 'map-source', 'calibrate'],
   文笔: ['write', 'repair', 'repair-length', 'repair-format', 'finish'], 复核: ['review', 'final-review']
 }
+export const nativeRuntimes = ['codex-native-v1', 'zcode-native-v1']
 const core = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'core')
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 async function writeContext(root, directory, target, value, shared = null) {
   const textFiles = [], textDirectory = await safePath(root, `${directory}/text`)
   async function materialize(item, field) {
     if (typeof item === 'string' && JSON.stringify(item).length > 1200) {
-      let file = shared?.files.get(item)
+      let file = shared?.files.get(readingText(item))
       if (!file) {
         const storage = shared?.directory ?? textDirectory
         await mkdir(storage, { recursive: true })
         const path = await safePath(root, resolve(storage, `text-${(shared?.files.size ?? textFiles.length) + 1}.txt`)), text = readingText(item)
         await writeFile(path, text, 'utf8')
         file = { path, lines: text.split('\n').length - Number(text.endsWith('\n')), wrapped: true }
-        shared?.files.set(item, file)
+        shared?.files.set(text, file)
       }
       textFiles.push({ field, ...file })
       return `完整内容见 UTF-8 阅读文件：${file.path}`
@@ -57,7 +58,7 @@ async function manuscriptView(root, project, chapter, directory) {
   return { path, originalPath, version: version.version, words: version.words, wrapped: true,
     lines: content.split('\n').length - Number(content.endsWith('\n')) }
 }
-function formatManuscript(text, format) {
+export function formatManuscript(text, format) {
   if (!format || typeof format !== 'object' || Array.isArray(format) || !Object.keys(format).length ||
       Object.keys(format).some(key => !['heading', 'indent'].includes(key)) ||
       format.heading !== undefined && !['plain', 'markdown'].includes(format.heading) ||
@@ -74,7 +75,7 @@ function formatManuscript(text, format) {
   }
   return lines.join(newline)
 }
-function compareText(current, candidate) {
+export function compareText(current, candidate) {
   const canonical = text => {
     const chapter = P.chapterText(text)
     // 只忽略章题井号、行首缩进和空行；保留段落边界、内部空格与标点。
@@ -92,7 +93,7 @@ export async function writerText(root, project, job, data) {
   if (data.draftFile !== undefined) {
     if (typeof data.draftFile !== 'string' || data.text !== undefined || data.patches !== undefined || data.format !== undefined || !/\.(md|txt)$/i.test(data.draftFile)) throw new Error('draftFile需要任务内MD/TXT文件，与text、patches、format互斥')
     if (repairing && !data.rewriteReason?.trim()) throw new Error('返修默认提交patches；引用整章草稿也需rewriteReason')
-    const directory = await safePath(root, job.directory), path = await safePath(directory, within(directory, data.draftFile))
+    const path = await taskFile(root, job, data.draftFile)
     if ((await requiredInputs(root, job)).some(item => P.local(root, item.path) === path)) throw new Error('draftFile只能引用本任务产出的草稿，不能把只读输入当作创作结果')
     const text = await P.textFile(path)
     if (!text.trim()) throw new Error('草稿为空')
@@ -100,14 +101,19 @@ export async function writerText(root, project, job, data) {
   }
   if (data.patches !== undefined || data.format !== undefined) {
     if (!repairing || data.text !== undefined || data.patches !== undefined && (!Array.isArray(data.patches) || !data.patches.length)) throw new Error('patches/format仅用于返修，不能同时提交text；patches至少有一处修改')
-    const version = P.latest(project, job.chapters[0])
+    const version = P.latest(project, currentChapter(job))
     if (!version || version.version !== job.basis[0].version) throw new Error('返修底稿版本已变化，重新派单')
     let text = await P.textFile(P.local(root, version.path))
     for (const patch of data.patches ?? []) {
       if (typeof patch.before !== 'string' || !patch.before || typeof patch.after !== 'string') throw new Error('每处patch需要非空before与字符串after')
-      const at = text.indexOf(patch.before)
-      if (at < 0 || text.indexOf(patch.before, at + 1) >= 0) throw new Error('返修before必须在当前稿中唯一匹配，请扩大原句范围')
-      text = text.slice(0, at) + patch.after + text.slice(at + patch.before.length)
+      const anchor = patch.before.split(/\r?\n/).map(line => line.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\r?\\n')
+      const pattern = new RegExp(anchor, 'g'), match = pattern.exec(text)
+      if (!match) throw new Error('返修before未在当前稿中找到，请从现稿重新复制原句')
+      pattern.lastIndex = match.index + 1
+      if (pattern.test(text)) throw new Error('返修before在当前稿中重复，请扩大原句范围')
+      const newline = match[0].match(/\r?\n/)?.[0] ?? text.match(/\r?\n/)?.[0] ?? '\n'
+      const replacement = patch.after.replace(/\r?\n/g, newline)
+      text = text.slice(0, match.index) + replacement + text.slice(match.index + match[0].length)
     }
     return data.format === undefined ? text : formatManuscript(text, data.format)
   }
@@ -119,8 +125,8 @@ export async function inspectDraft(root, project, data) {
   const role = project.jobs.find(job => job.id === data.task)?.role
   if (!['文笔', '复核'].includes(role)) throw new Error('计量需要绑定的文笔或复核任务单')
   const job = requireJob(project, data.task, role, undefined, role === '文笔' ? ['write', 'repair', 'repair-length', 'repair-format', 'finish'] : ['review', 'final-review'])
-  const directory = await safePath(root, job.directory)
-  const path = await safePath(directory, within(directory, data.file))
+  const directory = await safePath(root, job.currentDirectory ?? job.directory)
+  const path = await taskFile(root, job, data.file)
   const bodyChapters = job.chapters.filter(chapter => path === resolve(directory, `${P.pad(chapter)}-body.txt`) ||
     role === '复核' && [resolve(directory, 'chapters', `${P.pad(chapter)}-body.txt`), resolve(directory, 'chapters', `${P.pad(chapter)}-review.md`)].includes(path))
   if (job.action === 'finish' || role === '复核' || bodyChapters.length) {
@@ -147,7 +153,7 @@ export async function inspectDraft(root, project, data) {
   if ((await requiredInputs(root, job)).some(item => item.path === path)) throw new Error('不能把底本或任务材料当作候选草稿计量；当前正文使用manuscript视图')
   const raw = await P.textFile(path)
   const text = path.endsWith('.json') ? await writerText(root, project, job, JSON.parse(raw)) : raw
-  const chapter = job.chapters[0], words = P.measure(text), current = P.latest(project, chapter)
+  const chapter = currentChapter(job), words = P.measure(text), current = P.latest(project, chapter)
   return { task: job.id, chapter, file: path, ...P.lengthInfo(project, chapter, words), currentWords: current?.words ?? null,
     changeWords: current ? words - current.words : null, policy: project.length, unit: '正文汉字（Unicode Script=Han，不含章题）',
     ...(current ? { comparison: compareText(await P.textFile(P.local(root, current.path)), text) } : {}),
@@ -174,57 +180,116 @@ function within(base, path) {
   if (!rel || isAbsolute(rel) || rel === '..' || rel.startsWith('..\\') || rel.startsWith('../')) throw new Error('任务文件路径越出分配目录')
   return resolve(base, path)
 }
-export function taskInfo(root, job) {
-  return { ...job, directory: P.local(root, job.directory), promptPath: P.local(root, `${job.directory}/prompt.md`),
-    resultPath: P.local(root, `${job.directory}/result.json`), contextPath: P.local(root, `${job.directory}/context.json`) }
+async function taskFile(root, job, file) {
+  if (typeof file !== 'string' || !file.trim()) throw new Error('需要任务文件路径')
+  const directory = P.local(root, job.directory), current = P.local(root, job.currentDirectory ?? job.directory)
+  const projectPath = P.local(root, file), jobPath = resolve(directory, file)
+  const path = isAbsolute(file) || inside(directory, projectPath) ? projectPath : inside(current, jobPath) ? jobPath : resolve(current, file)
+  await safePath(root, current)
+  return safePath(current, within(current, path))
 }
+export const currentChapter = job => job.batch ? job.chapters[job.cursor ?? 0] : job.chapters[0]
+export function batchKey(project, chapter) {
+  return `${project.scope.revision}-${project.scope.from + Math.floor((chapter - project.scope.from) / project.interval) * project.interval}`
+}
+export function taskInfo(root, job) {
+  const directory = job.currentDirectory ?? job.directory
+  return { ...job, currentChapter: currentChapter(job), directory: P.local(root, job.directory), promptPath: P.local(root, `${directory}/prompt.md`),
+    resultPath: P.local(root, `${directory}/result.json`), contextPath: P.local(root, `${directory}/context.json`) }
+}
+
+export function taskContinuation(root, job) {
+  const { id, role, action, chapters, agent, status, resultPath } = taskInfo(root, job)
+  let next = 'check-worker'
+  if (status === 'pending') next = 'start'
+  else if (job.batch && job.committed.length === chapters.length) next = 'collect'
+  else if (existsSync(resultPath)) next = job.batch ? 'chapter-commit' : 'collect'
+  return { id, role, action, chapters, agent, status, result: resultPath, next }
+}
+async function sharedMaterials(root, project, chapter) {
+  const directory = await safePath(root, `.novel-workshop/batches/${batchKey(project, chapter)}/materials`)
+  await mkdir(directory, { recursive: true })
+  const files = new Map()
+  for (const name of await readdir(directory)) if (/^text-\d+\.txt$/.test(name)) {
+    const path = await safePath(root, resolve(directory, name)), text = await readFile(path, 'utf8')
+    files.set(text, { path, lines: text.split('\n').length - Number(text.endsWith('\n')), wrapped: true })
+  }
+  return { directory, files }
+}
+
+async function savedReviewValid(root, project, job, scope) {
+  if (job.action !== 'review' || !['continue', 'review', 'revise'].includes(scope.mode) || job.resultCorrection?.pending ||
+      !job.chapters.length || job.chapters.some(chapter => chapter < scope.from || chapter > scope.to)) return false
+  const candidate = { ...job, status: 'running' }
+  const inspection = { ...project, scope: { ...scope, revision: job.scopeRevision },
+    jobs: project.jobs.map(item => item === job ? candidate : item) }
+  try { return (await inspectResult(root, inspection, job.id)).valid === true }
+  catch { return false }
+}
+
 export async function updateScopeJobs(root, project, previous, previousInterval) {
-  const kept = [], cancelled = [], scope = project.scope, outlineCache = new Map()
+  const kept = [], cancelled = [], paused = [], scope = project.scope, outlineCache = new Map()
   const contained = scope.from >= previous.from && scope.to <= previous.to
-  for (const job of project.jobs.filter(item => ['pending', 'running'].includes(item.status))) {
-    let valid = contained && scope.mode === previous.mode && !['pause', 'export'].includes(scope.mode) && project.interval === previousInterval &&
+  for (const job of project.jobs.filter(item => ['pending', 'running', 'paused'].includes(item.status))) {
+    const wasPaused = job.status === 'paused'
+    if (scope.mode === 'pause' && (wasPaused || job.status === 'running' && job.scopeRevision === previous.revision && await savedReviewValid(root, project, job, previous))) {
+      job.status = 'paused'
+      job.reason = '独立复核结果已保存，恢复授权后重新核验材料并收件'
+      paused.push(job.id)
+      continue
+    }
+    const remaining = job.chapters.filter(id => !job.committed?.some(row => row.chapter === id))
+    let valid = wasPaused ? await savedReviewValid(root, project, job, scope) : contained && scope.mode === previous.mode && !['pause', 'export'].includes(scope.mode) && project.interval === previousInterval &&
       scope.reviseApproved === Boolean(previous.reviseApproved) && ['文笔', '复核'].includes(job.role) && job.action !== 'final-review' &&
-      job.scopeRevision === previous.revision && job.chapters.length > 0 && job.chapters.every(id => W.inScope(project, id))
-    if (valid) try {
-      for (const basis of job.basis) if ((P.latest(project, basis.chapter)?.version ?? null) !== basis.version ||
-        !equal(await P.contract(root, project, basis.chapter, { outlineCache }), basis.contract)) { valid = false; break }
+      job.scopeRevision === previous.revision && job.chapters.length > 0 && (job.batch ? remaining.filter(id => W.inScope(project, id)).length > 0 : job.chapters.every(id => W.inScope(project, id)))
+    if (valid && !wasPaused) try {
+      for (const basis of job.basis.filter(row => !job.committed?.some(item => item.chapter === row.chapter) && (!job.batch || W.inScope(project, row.chapter)))) if ((P.latest(project, basis.chapter)?.version ?? null) !== basis.version ||
+        !P.sameContract(batchContract(project, job, await P.contract(root, project, basis.chapter, { outlineCache })), batchContract(project, job, basis.contract))) { valid = false; break }
     } catch { valid = false }
     if (valid) {
       const path = await safePath(root, `.novel-workshop/read-receipts/${job.id}.json`)
       const receipt = existsSync(path) ? await P.jsonFile(path) : null
-      if (receipt?.task === job.id && receipt.agent === job.agent && receipt.scopeRevision === previous.revision) {
+      if (receipt?.task === job.id && receipt.agent === job.agent && receipt.scopeRevision === job.scopeRevision) {
         await writeFile(path, JSON.stringify({ ...receipt, scopeRevision: scope.revision }) + '\n', 'utf8')
       }
       job.scopeRevision = scope.revision
-      job.reason = '授权范围未扩大，本单章号、权限及制作依据仍有效，保留原代理与结果继续收件'
+      if (wasPaused) job.status = 'running'
+      if (job.batch) {
+        job.deferredChapters = [...(job.deferredChapters ?? []), ...job.chapters.filter(id => !job.committed.some(row => row.chapter === id) && !W.inScope(project, id))]
+        job.chapters = job.chapters.filter(id => job.committed.some(row => row.chapter === id) || W.inScope(project, id))
+        job.basis = job.basis.filter(row => job.chapters.includes(row.chapter))
+        await prepareTask(root, project, job)
+      }
+      job.reason = wasPaused ? '恢复授权覆盖本单且原复核通过重新预检，直接收件' : '授权范围未扩大，本单章号、权限及制作依据仍有效，保留原代理与结果继续收件'
       kept.push(job.id)
     } else {
       job.status = 'cancelled'; job.reason = '授权或任务依据已变化，保留产物后按新范围重新派单'; cancelled.push(job.id)
     }
   }
-  return { kept, cancelled }
+  return { kept, cancelled, ...(paused.length ? { paused } : {}) }
 }
 
 export async function requiredInputs(root, job) {
-  const directory = await safePath(root, job.directory), files = new Map()
+  const directory = await safePath(root, job.currentDirectory ?? job.directory), files = new Map()
   const add = (path, lines = null) => { if (!files.has(path)) files.set(path, { path, lines }) }
   add(resolve(directory, 'prompt.md')); add(resolve(directory, 'context.json')); add(resolve(core, 'roles', `${job.role}.md`))
   async function packet(path) {
     const context = await P.jsonFile(await safePath(root, path))
-    for (const item of context.textFiles ?? []) add(await safePath(directory, item.path), item.lines)
+    for (const item of context.textFiles ?? []) add(await safePath(root, item.path), item.lines)
     if (context.reviewReadings?.length) {
-      if (context.sharedReviewReading) add(await safePath(directory, context.sharedReviewReading.path), context.sharedReviewReading.lines)
-      for (const item of context.reviewReadings) add(await safePath(directory, item.path), item.lines)
+      if (context.sharedReviewReading) add(await safePath(root, context.sharedReviewReading.path), context.sharedReviewReading.lines)
+      for (const item of context.reviewReadings) add(await safePath(root, item.path), item.lines)
       return
     }
-    if (context.manuscript?.path) add(await safePath(directory, context.manuscript.path), context.manuscript.lines)
-    for (const item of context.manuscripts ?? []) add(await safePath(directory, item.path), item.lines)
-    for (const item of context.packets ?? []) { add(await safePath(directory, item.path)); await packet(item.path) }
+    for (const item of context.sharedReadings ?? []) add(await safePath(root, item.path), item.lines)
+    if (context.manuscript?.path) add(await safePath(root, context.manuscript.path), context.manuscript.lines)
+    for (const item of context.manuscripts ?? []) add(await safePath(root, item.path), item.lines)
+    for (const item of context.packets ?? []) { add(await safePath(root, item.path)); await packet(item.path) }
   }
   await packet(resolve(directory, 'context.json'))
   return [...files.values()]
 }
-export async function dispatch(root, project, data) {
+export async function dispatch(root, project, data, { replaces } = {}) {
   if (!roles[data.role]?.includes(data.action)) throw new Error('任务需要明确六岗位 role 与该岗位支持的 action')
   if (data.review !== undefined && data.action !== 'calibrate') throw new Error('review仅供calibrate填写已登记的审阅ID，不接收额外提示词；复核格式按context.resultContract，不把提示词传进review')
   if (project.scope.mode === 'pause') throw new Error('当前已暂停，不派发新制作任务')
@@ -248,7 +313,14 @@ export async function dispatch(root, project, data) {
     if (!chapters.length) chapters = Array.from({ length: target.to - target.from + 1 }, (_, i) => target.from + i)
     if (chapters[0] !== target.from || chapters.at(-1) !== target.to || chapters.length !== target.to - target.from + 1) throw new Error('校准任务必须覆盖当前待校准范围')
   }
-  if (data.role === '文笔' && data.action !== 'finish' && chapters.length !== 1) throw new Error('每个写作/返修任务只处理一章；finish仅批量补现稿记录')
+  if (data.role === '文笔' && !['write', 'finish'].includes(data.action) && chapters.length !== 1) throw new Error('返修任务只处理一章')
+  const batch = data.action === 'write' && chapters.length > 1
+  if (batch && (chapters.length > 3 || chapters.some((id, index) => id !== chapters[0] + index || P.latest(project, id)) ||
+      chapters.at(-1) >= project.scope.from + (Math.floor((chapters[0] - project.scope.from) / project.interval) + 1) * project.interval)) throw new Error('小批次写作限连续2—3个未写章，不能跨越复审节点')
+  if (batch) for (const chapter of chapters) if (!(await P.outlineContext(root, project, chapter)).outline.text?.trim()) throw new Error('批次内细纲缺失，先补规划或回退单章')
+  const triage = P.pendingTriage(project)
+  if (triage && data.role === '文笔') throw new Error(`先处理队长分流 triage：${triage.id}，不能提前派返修单`)
+
   if (data.role === '文笔' && !['continue', 'revise'].includes(project.scope.mode)) throw new Error('当前授权不允许文笔制作')
   const report = data.role === '文笔' ? await W.assertWriteReady(root, project, chapters[0]) : undefined
   if (data.action === 'finish') for (const chapter of chapters) {
@@ -258,25 +330,56 @@ export async function dispatch(root, project, data) {
   if (data.role === '文笔' && ['repair', 'repair-length', 'repair-format'].includes(data.action) && W.openIssues(project, chapters[0]).some(P.issueBlocks) &&
     report.tasks.some(task => task.type === 'review' && task.chapters.includes(chapters[0])) &&
     !report.tasks.some(task => ['repair', 'repair-length', 'repair-format'].includes(task.type) && task.chapters.includes(chapters[0]))) throw new Error('当前返修已提交，先派独立复核确认旧问题，不能重复返修待验稿')
-  const active = project.jobs.filter(x => ['pending', 'running'].includes(x.status) && x.scopeRevision === project.scope.revision)
-  const duplicate = active.find(x => x.role === data.role && x.action === data.action && equal(x.chapters, chapters))
-  if (duplicate) return taskInfo(root, duplicate)
+  const active = project.jobs.filter(x => x !== replaces && ['pending', 'running'].includes(x.status) && x.scopeRevision === project.scope.revision)
+  const duplicate = active.find(x => x.role === data.role && x.action === data.action && (x.microfix ?? null) === (data.microfix ?? null) && equal(x.chapters, chapters))
+  if (duplicate) {
+    if (replaces) throw new Error(`同范围已有任务 ${duplicate.id}，先核对执行状态`)
+    return taskInfo(root, duplicate)
+  }
   if (data.role === '文笔' && active.some(x => x.role === '文笔')) throw new Error('已有文笔任务，先收集实际结果再制作后章')
   const id = `job-${String(project.jobs.length + 1).padStart(4, '0')}`, directory = `.novel-workshop/tasks/${id}`
   const job = { id, directory, role: data.role, action: data.action, chapters, scopeRevision: project.scope.revision,
-    status: 'pending', agent: null, time: new Date().toISOString(), review: data.review ?? null, basis: [] }
+    status: 'pending', agent: null, ...(data.microfix ? { microfix: data.microfix } : {}), ...(data.issueIds ? { triageIssues: data.issueIds } : {}), ...(batch ? { batch: true, cursor: 0, committed: [] } : {}), batchKey: batchKey(project, chapters[0] ?? project.scope.from), time: new Date().toISOString(), review: data.review ?? null, basis: [] }
   const outlineCache = new Map()
   for (const chapter of chapters) job.basis.push({ chapter, version: P.latest(project, chapter)?.version ?? null, contract: await P.contract(root, project, chapter, { outlineCache }) })
+  await prepareTask(root, project, job, { report, calibration })
+  if (replaces) Object.assign(replaces, { status: 'cancelled', replacedBy: id, updated: job.time, reason: '原执行者已停止且未交结果，按当前依据重派' })
+  project.jobs.push(job)
+  await P.save(root, project)
+  return taskInfo(root, job)
+}
+
+export async function requeueInterrupted(root, project, id) {
+  const job = project.jobs.find(row => row.id === id)
+  if (!job || !nativeRuntimes.includes(job.runtime) || project.scope.mode === 'pause' || job.scopeRevision !== project.scope.revision) {
+    throw new Error('重派需要当前授权下已绑定的原生子代理任务')
+  }
+  if (job.replacedBy) {
+    const replacement = project.jobs.find(row => row.id === job.replacedBy)
+    if (replacement?.status === 'pending' && replacement.scopeRevision === project.scope.revision) return taskInfo(root, replacement)
+    throw new Error(`旧单已重派为 ${job.replacedBy}，请核对新单状态`)
+  }
+  if (job.status !== 'running') throw new Error('只有已绑定的运行中任务可以按中断重派，待启动单可直接绑定')
+  if (taskContinuation(root, job).next !== 'check-worker') throw new Error('本单已有结果或已全部提交，先核验并收件或逐章提交')
+  const chapters = job.chapters.filter(chapter => !job.committed?.some(row => row.chapter === chapter))
+  return await dispatch(root, project, { role: job.role, action: job.action, chapters, review: job.review ?? undefined,
+    microfix: job.microfix, issueIds: job.triageIssues }, { replaces: job })
+}
+export async function prepareTask(root, project, job, { report, calibration } = {}) {
+  const data = job, chapters = job.batch ? [currentChapter(job)] : job.chapters, id = job.id
+  const directory = job.batch ? `${job.directory}/segments/${P.pad(chapters[0])}` : job.directory
+  job.currentDirectory = directory
+  const outlineCache = new Map()
   const full = await safePath(root, directory)
   await mkdir(full, { recursive: true })
-  const shared = { directory: await safePath(root, `${directory}/text`), files: new Map() }
+  const shared = await sharedMaterials(root, project, chapters[0] ?? project.scope.from)
   let context
   if (data.action === 'finish') {
     const manuscripts = []
     for (const chapter of chapters) {
       const row = project.chapters[chapter], version = P.latest(project, chapter)
       manuscripts.push({ chapter, ...await manuscriptView(root, project, chapter, full), length: P.lengthInfo(project, chapter, version.words),
-        entryState: row.entryState ?? project.chapters[chapter - 1]?.exitState ?? null, entities: row.entities ?? [], factIds: row.factIds ?? [] })
+        entryState: row.entryState ?? P.currentExitState(project, chapter - 1), entities: row.entities ?? [], factIds: row.factIds ?? [] })
     }
     context = { action: 'finish', scope: project.scope, manuscripts,
       instruction: '按章顺序完整读回manuscripts中的当前正文，从实际已发生内容提取notes、experience、exitState；入章登记只供定位，以正文为准。仅补记录，不复制、润色或改写正文，不重读底本/整册/旧任务结果，不增加通过判决。发现正文疑点记入notes交后续独立复核，不在finish提交补丁。' }
@@ -307,17 +410,18 @@ export async function dispatch(root, project, data) {
     const previous = project.reviews.findLast(review => review.kind === draft.data.kind && review.chapters.some(row => chapters.includes(row.chapter)))
     const unchangedInputs = previous ? draft.data.chapters.filter(row => {
       const old = previous.chapters.find(item => item.chapter === row.chapter)
-      return old && old.version === row.version && old.path === row.path && P.sameStamp(old.stamp, row.stamp) && equal(old.contract, row.contract)
+      return old && old.version === row.version && old.path === row.path && P.sameStamp(old.stamp, row.stamp) && P.sameContract(old.contract, row.contract)
     }).map(row => row.chapter) : []
     context = { reviewDraft: { path: draft.path, data: reviewData }, packets, ...readings, scope: project.scope,
-      resultContract: { verdict: ['passed', 'rework'], issue: { text: '规则、原文问题与修法（必填，不只写rule/fix分项）', from: chapters[0], to: chapters[0], severity: 'yellow',
+      resultContract: { verdict: ['passed', 'rework'], missingReceipt: '缺两更的章先按现稿做独立检查，判rework并在summary注明待补登记；实读无内容缺陷时issues可为空。', issue: { text: '规则、原文问题与修法（必填，不只写rule/fix分项）', from: chapters[0], to: chapters[0], severity: 'yellow',
         evidence: { path: '本章manuscript.originalPath', quote: '从该正式稿逐字复制的连续短句，不拼接或补引号' } },
+        chapterEvidence: [{ path: '本条chapters[i].path（正式正文路径）', quote: '从当前稿逐字复制的连续短句' }],
         grades: { values: ['A', 'B', 'C', 'D'], example: { grade: 'B', reason: '实际阅读判断依据' }, passedRequires: '各维度A/B且reason非空，不写良好/合格；真正低于B时判返修，不为格式校验抬分' },
         correction: '保存result.json后先处理宿主预检反馈；仅字段或引文错误在原单修正，不重新冷读整批、不伪造通过。' },
       reviewFocus: { previousReview: previous?.id ?? null, previousReviewer: previous?.reviewerAgent ?? null,
         changedInputs: chapters.filter(chapter => !unchangedInputs.includes(chapter)), unchangedInputs,
-        instruction: '本列表只比较版本、路径、时间与任务依据，不表示审阅通过；当前开放问题仍逐项判决。新代理读全；同一Codex复核代理仅可复用自己已读且未变的输入，当前改稿及影响的前后关系仍须回读。DSH仍完整读取本单必读材料。' },
-      instruction: '按requiredReads完整读取逐章reviewReadings和sharedReviewReading，已整合packets、textFiles和当前正文的完整内容，勿再逐份重复读同内容的JSON与TXT。结构化packets保留供定位。按offset/limit分页；证据使用manuscript.originalPath，不引用整合稿路径，不跨新增换行取句。DSH保存结果后由宿主自动预检，不运行CLI；Codex按context.runtime.cli执行result-check只读预检，正式收件仍由队长collect。' }
+        instruction: '本列表只比较版本、路径、时间与任务依据，不表示审阅通过；当前开放问题仍逐项判决。新代理读全；同一Codex复核代理仅可复用自己已读且未变的输入，当前改稿及影响的前后关系仍须回读。DSH复用本人真实读过且未变的共享输入；新代理或丢失上下文仍完整读取。' },
+      instruction: '按requiredReads完整读取逐章reviewReadings和sharedReviewReading，已整合packets、textFiles和当前正文的完整内容，勿再逐份重复读同内容的JSON与TXT。结构化packets保留供定位。按offset/limit分页；证据使用manuscript.originalPath，不引用整合稿路径，不跨新增换行取句。DSH保存结果后由宿主自动预检，不运行CLI；Codex/ZCode按context.runtime.cli执行result-check只读预检，正式收件仍由队长collect。' }
   } else context = { diagnosis: await W.diagnose(root, project), scope: project.scope, chapters,
     parameters: { title: project.title, mode: project.mode, start: project.start, end: project.end,
       ...(project.length.type === 'fixed' ? { words: project.words } : {}), length: project.length, interval: project.interval },
@@ -339,17 +443,39 @@ export async function dispatch(root, project, data) {
     data.role === '复核' ? '使用reviewDraft.data作为结果模板，完整读取逐章整合阅读稿及共享依据，不再重复读取同内容的旧格式材料；无需抄写contract或stamp，宿主按派单依据补齐并核实。整单与每个chapters条目的verdict均为passed/rework；有问题的章返修，其他完成全部检查且无阻塞的章明确passed，程序保留未受影响的逐章通过；旧问题在resolutions逐项填open/resolved，resolved须给resolution及当前稿evidence。issues只新增新发现，跨章问题用affectedChapters列齐需要修改正文或出章状态的章，from/to覆盖其完整范围；只作背景引用的章不算待修范围。red必阻塞、yellow默认阻塞；可选建议用info或blocking:false说明理由。不得修改正文或主账。' :
     data.action === 'calibrate' ? '实际核对或更新当前待校准范围内细纲，把 {"outline":[已核对章号],"note":"复盘及调整依据","artifacts":[{"path":"任务目录内文件","target":"项目细纲相对路径"}]} 写入 result.json。' :
     '先分析context.documents的已有文档、候选与实际相关段落；已有成果可用时artifacts为空，不另建一份。需要补充时优先artifacts:[{target:"已有文档相对路径",patches:[{before:"唯一原句",after:"修改后原句"}]}]，或path指定任务内完整文件。新建同用途文件须createReason解释已有文件为何不能承载。result.json同时提供summary；来源与批准由队长登记。'
+  if (job.microfix) {
+    const fix = project.microfixes?.find(row => row.id === job.microfix && row.status === 'pending-confirmation')
+    if (job.role !== '复核' || !fix || chapters.length !== 1 || chapters[0] !== fix.chapter || P.latest(project, fix.chapter)?.version !== fix.afterVersion) throw new Error('微修确认必须对应待确认的新版本及完整单章')
+    context.microfix = { ...fix, instruction: '本单独立确认程序微修；原复核的全文阅读上下文仍有效时可由宿主切换定点差异材料。未确认保留阻塞，不自行将新稿当通过。' }
+  }
   context.runtime = runtime
+  if (job.batch) context.batch = { task: job.id, current: currentChapter(job), planned: job.chapters, committed: job.committed.map(row => row.chapter),
+    instruction: '每次只制作current章。保存当前resultPath后用novel_submit（Codex用chapter-commit --task ID --file 当前结果）逐章提交；程序校验并保存正文、两更和出章状态后返回下一章的新prompt/context/result路径。必须读取新材料后再写下一章，不把多章塞进最终JSON。上下文不足可stopAfter/--stop-after，在章边界结束本单；前章进度保留。' }
+  if (context.readingPaths?.length) {
+    context.sharedReadings = []
+    for (const originalPath of [...new Set(context.readingPaths)]) if (existsSync(originalPath)) {
+      const source = await P.textFile(originalPath)
+      const journal = [project.paths.notes, project.paths.experience].some(path => P.local(root, path) === originalPath)
+        ? P.journalSlice(source, project, currentChapter(job) ?? project.scope.from, (context.outline?.ranges ?? []).map(range => range.chapter)) : null
+      const text = readingText(journal?.text ?? source)
+      let file = shared.files.get(text)
+      if (!file) {
+        const path = await safePath(root, resolve(shared.directory, `text-${shared.files.size + 1}.txt`))
+        await writeFile(path, text, 'utf8')
+        file = { path, lines: text.split('\n').length - Number(text.endsWith('\n')), wrapped: true }
+        shared.files.set(text, file)
+      }
+      context.sharedReadings.push({ originalPath, ...file, ...(journal?.omittedSections ? { scoped: true, sourceRanges: journal.ranges, omittedSections: journal.omittedSections } : {}) })
+    }
+    context.readingPaths = context.sharedReadings.map(item => item.path)
+  }
   await writeContext(root, directory, resolve(full, 'context.json'), context, shared)
   const inputs = await requiredInputs(root, job)
   const storedContext = await P.jsonFile(resolve(full, 'context.json'))
   await writeFile(resolve(full, 'context.json'), JSON.stringify({ requiredReads: inputs, ...storedContext }, null, 2) + '\n', 'utf8')
   const repairProtocol = data.role === '文笔' && context.repair && data.action !== 'finish' ? '\n返修result.json优先用patches:[{before:"当前稿唯一原句",after:"修改后原句"}]替代text，仍提交notes/experience/exitState；不涉及的正文由程序原样保留。' : ''
-  const measureProtocol = data.role === '文笔' && data.action !== 'finish' ? '\n先在当前任务内分配各场景的内容与篇幅，再连续写成完整初稿；不要先写半章再逐句补到某个比例。自查发现的同轮修改集中完成；完整稿保存一次后按宿主计量处理实际缺口，不在每改一句后计量，也不为减少调用跳过必要修订。DSH保存result.json自动反馈；单独草稿可用novel_draft，Codex用draft-check，完整修订后再核对。minRatio/maxRatio为空时没有95%等数字门槛，不从历史比例推导合格线；按本章场景份量完整起草，只有具体内容缺口才集中补齐。已有唯一完整草稿可用draftFile替代text；排版只用format的heading/indent机械处理，不重抄整章。字数相同不证明内容相同，返修看comparison，不写计数探针。' : ''
-  await writeFile(await safePath(root, resolve(full, 'prompt.md')), `# ${id} · ${data.role} · ${data.action}\n\n项目：${root}\n章号：${chapters.join('、') || '当前授权范围'}\n\n你是独立的${data.role}子代理，不是主会话队长。实际CLI、手册与协议路径见context.runtime，不猜测项目内bin/core。先读岗位卡 ${resolve(core, 'roles', `${data.role}.md`)} 和本目录 context.json，按其中真实文件取证。\n仅在本任务目录 ${full} 内写文件；不得改项目登记、正式章稿、两更或别的任务目录。所有正式结果由队长 collect 串行提交。不创建其他聊天，不转派本岗位工作。\nCodex首次启动尚未绑定时只读准备，收到队长对本单的绑定成功确认后才执行并写结果；同岗位续单先绑定再通知，不自行轮询主账。DSH派单已由宿主预先绑定，可按启动通知直接执行。\n${data.action === 'finish' ? '本单不创作或修订正文，只提取当前稿的两更与出章状态；岗位卡中的首稿、返修和草稿交稿流程不适用于本单。' : data.role === '文笔' ? '只有你负责正文创作。' : '你不得创作或改写小说正文。'}\n\n${protocol}${repairProtocol}${measureProtocol}\n\n## 完整必读清单\n\n${inputs.map(item => `- ${item.path}${item.lines ? `（约${item.lines}行）` : ''}`).join('\n')}\n\n按清单逐份read，独立文件可在同一步并行读取；分页读到末尾。材料齐全后直接完成岗位工作，不额外读插件源码、整册或整份project.json查协议。\n\n完成后返回 result.json 绝对路径及≤200字结果摘要；没有材料或权限时明确报告阻塞，不伪造完成。\n`, 'utf8')
-  project.jobs.push(job)
-  await P.save(root, project)
-  return taskInfo(root, job)
+  const measureProtocol = data.role === '文笔' && data.action !== 'finish' ? '\n先在当前任务内分配各场景的内容与篇幅，再连续写成完整初稿；不要先写半章再逐句补到某个比例。自查发现的同轮修改集中完成；完整稿保存一次后按宿主计量处理实际缺口，不在每改一句后计量，也不为减少调用跳过必要修订。DSH保存result.json自动反馈；单独草稿可用novel_draft，Codex/ZCode用draft-check，完整修订后再核对。minRatio/maxRatio为空时没有95%等数字门槛，不从历史比例推导合格线；按本章场景份量完整起草，只有具体内容缺口才集中补齐。已有唯一完整草稿可用draftFile替代text；排版只用format的heading/indent机械处理，不重抄整章。字数相同不证明内容相同，返修看comparison，不写计数探针。' : ''
+  await writeFile(await safePath(root, resolve(full, 'prompt.md')), `# ${id} · ${data.role} · ${data.action}\n\n项目：${root}\n章号：${chapters.join('、') || '当前授权范围'}\n\n你是独立的${data.role}子代理，不是主会话队长。实际CLI、手册与协议路径见context.runtime，不猜测项目内bin/core。先读岗位卡 ${resolve(core, 'roles', `${data.role}.md`)} 和本目录 context.json，按其中真实文件取证。\n仅在本任务目录 ${full} 内写文件；不得直接写项目登记、正式章稿、两更或别的任务目录。单章结果由队长collect提交；小批次仅用专用chapter-commit/novel_submit逐章提交，结束后由队长收件。不创建其他聊天，不转派本岗位工作。\nCodex/ZCode首次启动尚未绑定时只读准备，收到队长对本单的绑定成功确认后才执行并写结果；同岗位续单先绑定再通知，不自行轮询主账。DSH派单已由宿主预先绑定，可按启动通知直接执行。\n${data.action === 'finish' ? '本单不创作或修订正文，只提取当前稿的两更与出章状态；岗位卡中的首稿、返修和草稿交稿流程不适用于本单。' : data.role === '文笔' ? '只有你负责正文创作。' : '你不得创作或改写小说正文。'}\n\n${protocol}${repairProtocol}${measureProtocol}\n\n## 完整必读清单\n\n${inputs.map(item => `- ${item.path}${item.lines ? `（约${item.lines}行）` : ''}`).join('\n')}\n\n按清单逐份read，独立文件可在同一步并行读取；分页读到末尾。材料齐全后直接完成岗位工作，不额外读插件源码、整册或整份project.json查协议。\n\n完成后返回 result.json 绝对路径及≤200字结果摘要；没有材料或权限时明确报告阻塞，不伪造完成。\n`, 'utf8')
 }
 export async function updateTask(root, project, data) {
   const job = project.jobs.find(x => x.id === data.id)
@@ -357,11 +483,13 @@ export async function updateTask(root, project, data) {
   if (data.status === 'running') {
     if (!['pending', 'running'].includes(job.status) || job.scopeRevision !== project.scope.revision) throw new Error('任务已终止或授权已变化，请重新派单')
     if (typeof data.agent !== 'string' || !data.agent.trim()) throw new Error('启动任务需要原生子代理的实际 agent ID')
+    if (data.runtime !== undefined && !nativeRuntimes.includes(data.runtime)) throw new Error(`不支持的运行时标识：${data.runtime}（只支持 ${nativeRuntimes.join(' / ')}）`)
     if (job.agent && job.agent !== data.agent) throw new Error('不可替换运行中任务的子代理，先取消旧单再派新单')
     if (project.jobs.some(other => other.id !== job.id && other.agent === data.agent && other.role !== job.role)) throw new Error('六岗位使用独立子代理，不能复用其他岗位的执行者')
     if (project.jobs.some(other => other.id !== job.id && other.agent === data.agent && ['pending', 'running'].includes(other.status))) throw new Error('该子代理已有未收件任务，先collect或取消旧单，再绑定新单；不能同时执行两张任务单')
     if (job.role === '复核' && job.chapters.some(n => P.latest(project, n)?.authorAgent === data.agent)) throw new Error('复核子代理不能与本章文笔子代理相同')
     job.agent = data.agent
+    job.runtime ??= data.runtime ?? 'codex-native-v1'
   } else if (!['failed', 'cancelled'].includes(data.status) || !data.reason?.trim() || job.status === 'completed') throw new Error('任务状态支持 running、failed、cancelled；失败或取消需 reason')
   job.status = data.status; job.reason = data.reason ?? null; job.updated = new Date().toISOString()
   await P.save(root, project)
@@ -429,15 +557,21 @@ async function commitArtifacts(root, pending) {
 export async function assertReadReceipt(root, job) {
   if (job.runtime === 'dsh-worker-v1') {
     const receipt = await P.jsonFile(await safePath(root, `.novel-workshop/read-receipts/${job.id}.json`)).catch(() => null)
-    if (receipt?.complete !== true || receipt.task !== job.id || receipt.agent !== job.agent || receipt.scopeRevision !== job.scopeRevision) throw new Error('缺少真实worker完整阅读回执，不能收件；等待完成通知，缺料则记录失败后重新派发')
+    if (receipt?.complete !== true || receipt.task !== job.id || receipt.agent !== job.agent || receipt.scopeRevision !== job.scopeRevision || job.batch && receipt.chapter !== currentChapter(job)) throw new Error('缺少真实worker完整阅读回执，不能收件；等待完成通知，缺料则记录失败后重新派发')
     return receipt
   }
 }
+function batchContract(project, job, contract) {
+  if (!job.batch) return contract
+  return { ...contract, linkedChapters: contract.linkedChapters.map(row =>
+    job.committed.some(item => item.chapter === row.chapter) && P.latest(project, row.chapter)?.task === job.id ? { chapter: row.chapter, committedByTask: job.id } : row) }
+}
 export async function assertTaskBasis(root, project, job) {
   const outlineCache = new Map()
+  if (job.batch) for (const item of job.committed) if (!await P.versionValid(root, project.chapters[item.chapter].versions.find(row => row.version === item.version))) throw new Error('已提交前章实际文件已变化，先核对登记，不继续后章')
   for (const basis of job.basis) {
     if (job.role === '文笔' && P.latest(project, basis.chapter)?.task === job.id || job.role === '复核' && project.reviews.some(x => x.task === job.id)) continue
-    if ((P.latest(project, basis.chapter)?.version ?? null) !== basis.version || !equal(await P.contract(root, project, basis.chapter, { outlineCache }), basis.contract)) throw new Error('任务材料已变化，取消旧单并重新派发受影响岗位')
+    if ((P.latest(project, basis.chapter)?.version ?? null) !== basis.version || !P.sameContract(batchContract(project, job, await P.contract(root, project, basis.chapter, { outlineCache })), batchContract(project, job, basis.contract))) throw new Error('任务材料已变化，取消旧单并重新派发受影响岗位')
     if (job.role === '复核' && !await P.versionValid(root, P.latest(project, basis.chapter))) throw new Error('任务材料已变化，当前稿登记失效，先核对版本，不能仅修结果字段')
   }
 }
@@ -460,6 +594,13 @@ export async function collect(root, project, id) {
   const job = project.jobs.find(x => x.id === id)
   if (job?.status === 'completed') return { ...taskInfo(root, job), output: job.output }
   requireJob(project, id, job?.role)
+  if (job.batch) {
+    await assertTaskBasis(root, project, job)
+    if (job.committed.length !== job.chapters.length) throw new Error('小批次尚有未提交章，使用chapter-commit逐章落盘；不得最终一次性交多章JSON')
+    job.status = 'completed'; job.output = { committedChapters: job.committed, registeredChapters: job.committed.map(row => row.chapter) }; job.updated = new Date().toISOString()
+    await P.save(root, project)
+    return { ...taskInfo(root, job), output: job.output }
+  }
   await assertReadReceipt(root, job)
   const data = await P.jsonFile(await safePath(root, `${job.directory}/result.json`))
   const chapter = job.chapters[0]
@@ -502,8 +643,101 @@ export async function collect(root, project, id) {
     output = { summary: data.summary ?? data.note, files: await commitArtifacts(root, pending) }
     if (calibration) { project.calibrations.push(calibration); output.calibration = calibration }
   }
+  if (job.triageIssues) for (const id of job.triageIssues) {
+    const issue = project.issues.find(row => row.id === id)
+    if (issue?.triage?.route === 'plan') issue.triage = { ...issue.triage, route: 'repair', planningTask: job.id }
+  }
   job.status = 'completed'; job.output = output; job.updated = new Date().toISOString()
   if (job.resultCorrection) job.resultCorrection.pending = false
   await P.save(root, project)
   return { ...taskInfo(root, job), output }
+}
+
+export async function commitChapter(root, project, data) {
+  const job = project.jobs.find(item => item.id === data.task)
+  const file = resolve(data.file ?? '')
+  const previous = job?.committed?.find(item => item.resultPath === file)
+  if (previous) return { committed: previous, repeated: true, task: taskInfo(root, job) }
+  requireJob(project, data.task, '文笔', undefined, ['write'])
+  if (!job.batch || job.committed.length === job.chapters.length) throw new Error('chapter-commit只用于仍有当前章的小批次写作任务')
+  const info = taskInfo(root, job), chapter = currentChapter(job)
+  if (file !== resolve(info.resultPath)) throw new Error('只能提交当前章resultPath，不能提前提交后章或引用别单')
+  await assertReadReceipt(root, job)
+  await assertTaskBasis(root, project, job)
+  const result = await P.jsonFile(await safePath(root, file))
+  W.validateReceipt(result)
+  if (P.latest(project, chapter)?.task !== job.id) await W.writeChapter(root, project, chapter, await writerText(root, project, job, result), false, job.id)
+  await W.finish(root, project, { ...result, chapter }, job.id)
+  const current = P.latest(project, chapter)
+  const committed = { chapter, version: current.version, path: current.path, words: current.words, resultPath: file }
+  job.committed.push(committed); job.cursor++
+  if (data.stopAfter === true) { job.deferredChapters = job.chapters.slice(job.cursor); job.chapters = job.chapters.slice(0, job.cursor) }
+  if (job.cursor < job.chapters.length) {
+    try {
+      await assertTaskBasis(root, project, job)
+      const basis = job.basis.find(row => row.chapter === currentChapter(job))
+      basis.contract = await P.contract(root, project, currentChapter(job))
+      await prepareTask(root, project, job)
+    } catch (error) {
+      job.status = 'failed'; job.reason = `前章已保存，后章材料准备失败：${error.message}`
+      await P.save(root, project)
+      return { committed, blocked: true, error: job.reason, task: taskInfo(root, job) }
+    }
+  }
+  await P.save(root, project)
+  return { committed, awaitingCollect: job.cursor === job.chapters.length, task: taskInfo(root, job),
+    instruction: job.cursor < job.chapters.length ? '当前章已校验落盘；读取task的新promptPath/contextPath，再制作下一章。' : '本单各章已保存；返回任务摘要，由队长收件并续作。' }
+}
+
+export async function useMicroDelta(root, project, job, { contextRetained = false } = {}) {
+  if (!contextRetained || !job.microfix) return false
+  const fix = project.microfixes.find(row => row.id === job.microfix)
+  const source = project.jobs.find(row => row.id === fix?.sourceTask)
+  if (!fix || job.agent !== fix.reviewerAgent || source?.agent !== job.agent || source.status !== 'completed' || source.scopeRevision !== job.scopeRevision ||
+      !P.sameContract(fix.beforeContract, await P.contract(root, project, fix.chapter))) return false
+  const audit = await P.jsonFile(await safePath(root, fix.diffPath))
+  const before = await P.textFile(P.local(root, fix.beforePath)), after = await P.textFile(P.local(root, fix.afterPath))
+  if (audit.before !== before || audit.after !== after) return false
+  let declared = before
+  for (const patch of fix.patches) {
+    const at = declared.indexOf(patch.before)
+    if (at < 0 || declared.indexOf(patch.before, at + 1) >= 0) return false
+    declared = declared.slice(0, at) + patch.after + declared.slice(at + patch.before.length)
+  }
+  if (fix.format) declared = formatManuscript(declared, fix.format)
+  if (declared !== after) return false
+  const path = await safePath(root, `.novel-workshop/microfixes/${fix.id}/confirmation.md`)
+  const contexts = fix.patches.map(patch => {
+    const at = after.indexOf(patch.after)
+    return `问题${patch.issue}\n原句：${patch.before}\n替换：${patch.after}\n相关当前上下文：${after.slice(Math.max(0, at - 350), at + patch.after.length + 350)}`
+  })
+  const text = readingText(`# 微修定点确认 ${fix.id}\n原独立复核：${fix.sourceReview}；你本人${fix.reviewerAgent}已完整读过原稿及依据。\n当前正式稿：${P.local(root, fix.afterPath)}\n完整差异：${JSON.stringify(fix.patches)}\n机械排版：${JSON.stringify(fix.format ?? null)}\n程序已核对差异完整且依据未变。逐项复验问题、替换结果及前后指代；发现影响扩大就报告，不抬分或自动通过。必要时按正式路径回查。\n\n${contexts.join('\n\n')}`)
+  await writeFile(path, text, 'utf8')
+  const info = taskInfo(root, job), context = await P.jsonFile(info.contextPath)
+  context.reviewReadings = [{ chapter: fix.chapter, path, lines: text.split('\n').length - Number(text.endsWith('\n')) }]
+  delete context.sharedReviewReading
+  context.textFiles = []; context.sharedReadings = []
+  context.microfix.deltaOnly = true
+  context.reviewFocus.instruction = '已验证原代理、原完整阅读及未变依据；本次按完整差异和相关上下文确认。上下文丢失或材料变化立即恢复完整读取。'
+  await writeFile(info.contextPath, JSON.stringify(context, null, 2) + '\n', 'utf8')
+  context.requiredReads = await requiredInputs(root, job)
+  await writeFile(info.contextPath, JSON.stringify(context, null, 2) + '\n', 'utf8')
+  await writeFile(info.promptPath, `# ${job.id} · 原复核定点确认\n\n你仍是原独立复核代理，只处理${fix.id}，不改正文。先读context.json、原岗位卡及requiredReads中的完整差异和上下文；原全文阅读与规则未变且仍在本人上下文。若已丢失则请求恢复完整材料，不凭摘要签认。使用reviewDraft.data提交逐章判决与resolutions，证据指向当前正式稿，写本任务result.json。\n`, 'utf8')
+  job.deltaReview = true
+  await P.save(root, project)
+  return true
+}
+export function publicTask(job) {
+  if (!job?.id?.startsWith('job-')) return job
+  const keys = ['id', 'role', 'action', 'chapters', 'currentChapter', 'scopeRevision', 'status', 'agent', 'runtime', 'directory', 'promptPath', 'contextPath', 'resultPath', 'batch', 'cursor', 'committed', 'microfix', 'deltaReview', 'archive', 'archivedIn', 'reason', 'replacedBy']
+  const result = Object.fromEntries(keys.filter(key => job[key] !== undefined).map(key => [key, job[key]]))
+  if (job.output) {
+    const { path, version, length, review, receipts, committedChapters, registeredChapters } = job.output
+    result.output = { path, version, length, ...(receipts ? { registeredChapters: receipts.map(row => row.chapter) } : {}),
+      ...(registeredChapters ? { registeredChapters } : {}), ...(committedChapters ? { committedChapters } : {}),
+      ...(review ? { review: { id: review.id, verdict: review.verdict, summary: review.summary, triage: review.triage,
+        chapters: review.chapters.map(row => ({ chapter: row.chapter, version: row.version, verdict: P.rowVerdict(review, row) })),
+        issues: review.issues.length, resolved: review.resolutions?.filter(row => row.status === 'resolved').map(row => row.id) ?? [] } } : {}) }
+  }
+  return result
 }

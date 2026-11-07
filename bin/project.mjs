@@ -63,6 +63,9 @@ export async function scan(root, bodyPath, project = null) {
 export function latest(project, chapter) {
   return project.chapters[String(chapter)]?.versions.at(-1) ?? null
 }
+export function currentExitState(project, chapter) {
+  return latest(project, chapter)?.receipt ? project.chapters[chapter]?.exitState ?? null : null
+}
 export function chapterIds(project) {
   return Object.keys(project.chapters).map(Number).filter(id => latest(project, id)).sort((a, b) => a - b)
 }
@@ -80,7 +83,7 @@ export function templateProject(root, options = {}) {
     metadata: { author: '', description: '', language: 'zh-CN', cover: null },
     paths: { body: '09-正文', outline: '06-细纲', notes: '07-注意事项.md', experience: '08-经验文档.md', reports: '10-验收', output: '11-成书' },
     gates: {}, source: null, chapters: {}, requirements: [], facts: [], issues: [], experiences: [], materials: [],
-    exceptions: [], calibrations: [], maxRepairRounds: 3, parameters: {}, jobs: [],
+    exceptions: [], calibrations: [], maxRepairRounds: 3, writeBatchSize: 3, microfixes: [], parameters: {}, jobs: [],
     scope: { revision: 0, mode: 'pause', from: start, to: end, deliver: false, source: '尚未登记制作授权' },
     scopeHistory: [], reviews: [], exports: [], checkpoint: null, autoArchive: true, archives: [], cleanupScope: null }
 }
@@ -91,6 +94,8 @@ export async function load(root) {
   project.exceptions ??= []
   project.calibrations ??= []
   project.maxRepairRounds ??= 3
+  project.writeBatchSize ??= 3
+  project.microfixes ??= []
   project.parameters ??= {}
   project.jobs ??= []
   project.documents ??= {}
@@ -113,6 +118,11 @@ export function missingParameters(project) {
   const labels = { mode: '制作模式：原创还是改编精修', plan: '全书范围：起始章号与终止章号（或总章数）',
     length: '篇幅政策：固定章均字数，或按底本场景完整度决定；如有比例限制请说明', interval: '审查间隔：每几章复审（尾批自动复审）' }
   return Object.entries(labels).filter(([key]) => !project.parameters?.[key]?.source).map(([key, question]) => ({ key, question }))
+}
+export function pendingTriage(project) {
+  return project.reviews.find(review => review.triage?.status === 'pending' &&
+    (review.triage.pendingIssues ?? review.triage.issues).some(id => project.issues.some(issue => issue.id === id && issue.status === 'open' && issue.to >= project.scope.from && issue.from <= project.scope.to &&
+      (project.scope.mode !== 'review' || issue.from >= project.scope.from && issue.to <= project.scope.to))))
 }
 export const rowVerdict = (review, row) => ['passed', 'rework'].includes(row.verdict) ? row.verdict : review.verdict
 export function calibrationTarget(project, approved) {
@@ -227,6 +237,10 @@ function selectOutline(document, wanted) {
     ...selected.map(item => ({ chapter: item.chapter, start: item.start + 1, end: item.end }))]
   return { text: ranges.map(item => lines.slice(item.start - 1, item.end).join('\n')).join('\n\n'), ranges }
 }
+function outlineBasis(text, wanted) {
+  const source = text?.replace(/<!-- novel-workshop:progress:start -->[\s\S]*?<!-- novel-workshop:progress:end -->\s*/g, '')
+  return selectOutline(outlineDocument(source), wanted).text?.trimEnd() ?? ''
+}
 export function outlineSlice(text, chapter, dependencies = []) {
   const document = outlineDocument(text)
   if (!document.headings.length) return selectOutline(document, new Set([chapter]))
@@ -234,6 +248,41 @@ export function outlineSlice(text, chapter, dependencies = []) {
   const wanted = new Set([chapter - 1, chapter, chapter + 1, ...dependencies, ...outlineReferences(document, chapter)])
   return { ...selectOutline(document, wanted),
     relatedChapters: [...wanted].filter(id => id >= 0 && !document.headings.some(item => item.chapter === id)) }
+}
+export function journalSlice(text, project, chapter, dependencies = []) {
+  const lines = text.split(/\r?\n/), sections = []
+  for (let index = 0; index < lines.length; index++) {
+    const heading = lines[index].match(/^##\s+(.+)/)
+    if (!heading) continue
+    const title = heading[1], receipt = title.match(/^第\s*(\d+)\s*章\s+v(\d+)\b/i)
+    sections.push({ start: index, title, receipt, round: /^\d{4}[-/]\d{1,2}[-/]\d{1,2}\s*(?:\/|[·：:]|$)/.test(title) })
+  }
+  if (!sections.some(section => section.round || section.receipt)) return { text, ranges: [{ start: 1, end: lines.length }], omittedSections: 0 }
+  sections.forEach((section, index) => { section.end = sections[index + 1]?.start ?? lines.length })
+  const direct = [...new Set([chapter, chapter - 1, ...(project.chapters[chapter]?.dependencies ?? []), ...dependencies])]
+    .filter(id => Number.isSafeInteger(id) && id >= project.start && id <= chapter)
+  const selected = new Set(sections.filter(section => !section.round && !section.receipt))
+  const rounds = sections.filter(section => section.round)
+  if (rounds.length) selected.add(rounds.at(-1))
+  const mentions = (title, id) => {
+    title = title.replace(/^\d{4}[-/]\d{1,2}[-/]\d{1,2}/, '')
+    if ([...title.matchAll(/第\s*(\d+)\s*章/g)].some(match => Number(match[1]) === id)) return true
+    return [...title.matchAll(/(?:第\s*)?(\d+)\s*(?:—|–|至|~|～|-)\s*(\d+)\s*章?/g)]
+      .some(match => Number(match[1]) <= id && id <= Number(match[2]))
+  }
+  for (const id of direct) {
+    const round = rounds.findLast(section => mentions(section.title, id))
+    if (round) selected.add(round)
+    const version = latest(project, id)
+    if (version?.receipt) {
+      const receipt = sections.findLast(section => section.receipt && Number(section.receipt[1]) === id && Number(section.receipt[2]) === version.version)
+      if (receipt) selected.add(receipt)
+    }
+  }
+  const ranges = [...(sections[0].start ? [{ start: 1, end: sections[0].start }] : []),
+    ...sections.filter(section => selected.has(section)).map(section => ({ start: section.start + 1, end: section.end }))]
+  return { text: ranges.map(range => lines.slice(range.start - 1, range.end).join('\n')).join('\n\n'), ranges,
+    omittedSections: sections.length - selected.size }
 }
 /** 只补本章直接关联；批次共用 outlineCache，复用细纲文件与目录读取。 */
 export async function outlineContext(root, project, chapter, options = {}) {
@@ -381,17 +430,30 @@ export async function sourceSlices(root, project, ids, sourceLines = null) {
   return ids.flatMap(id => (project.source.chapters[id]?.segments ?? []).map(s => ({ chapter: Number(id), ...s,
     path: local(root, project.source.path), text: lines.slice(s.start - 1, s.end).join('\n') })))
 }
-export async function registerFiles(root, project) {
+export async function registerFiles(root, project, adopted = {}) {
   const added = [], duplicates = [], rows = await scan(root, project.paths.body, project), seen = new Map()
   const keyPath = value => process.platform === 'win32' ? value.toLowerCase() : value
+  const highest = new Map()
+  for (const row of rows) highest.set(row.chapter, Math.max(highest.get(row.chapter) ?? 0, row.version))
   // 先核对整批冲突，再登记，避免半批被当成已接手。
   for (const row of rows) {
     if (row.chapter < project.start || row.chapter > project.end) continue
+    const versions = project.chapters[row.chapter]?.versions ?? []
     const key = `${row.chapter}:${row.version}`, old = seen.get(key) ?? project.chapters[row.chapter]?.versions.find(version => version.version === row.version)?.path
-    if (old && keyPath(old) !== keyPath(row.path)) duplicates.push(`${old} ↔ ${row.path}`)
+    if (old && keyPath(old) !== keyPath(row.path)) {
+      const selected = adopted[row.chapter]?.file
+      const registered = versions.some(version => version.version === row.version && keyPath(version.path) === keyPath(old))
+      if (registered && typeof selected === 'string' && keyPath(portable(root, selected)) === keyPath(row.path)) {
+        row.version = Math.max(highest.get(row.chapter), ...versions.map(version => version.version)) + 1
+        highest.set(row.chapter, row.version)
+        seen.set(`${row.chapter}:${row.version}`, row.path)
+        continue
+      }
+      duplicates.push(`${old} ↔ ${row.path}`)
+    }
     seen.set(key, row.path)
   }
-  if (duplicates.length) throw new Error(`同一章节版本存在多个文件：${duplicates.join('、')}；已登记采用路径优先，未登记的真实歧义须按现行资料确定，不能用finish绕过`)
+  if (duplicates.length) throw new Error(`同一章节版本存在多个文件：${duplicates.join('、')}。已确认外部新采用稿且有采用表时，用 doctor --fix --adopted <采用表JSON> 登记；其余歧义须先核对采用路径`)
   for (const row of rows) {
     if (row.chapter < project.start || row.chapter > project.end) continue
     const chapter = project.chapters[row.chapter] ??= { sourceIds: project.source?.chapters[row.chapter] ? [row.chapter] : [], treatment: '待核对', baselineTreatment: '待核对', dependencies: [], factIds: [], entities: [], versions: [] }
@@ -424,23 +486,50 @@ export async function contract(root, project, chapter, options = {}) {
   }
   const relatedOutlines = []
   // 相邻章是阅读参考；后续新建其细纲不应使已通过的前批次重新复核。
-  for (const entry of outlines.relatedOutlines.filter(entry => entry.requiredChapters.length)) relatedOutlines.push({ path: portable(root, entry.path), stamp: await optionalStamp(entry.path) })
+  for (const entry of outlines.relatedOutlines.filter(entry => entry.requiredChapters.length)) relatedOutlines.push({ path: portable(root, entry.path),
+    stamp: await optionalStamp(entry.path), text: outlineBasis(entry.text, new Set(entry.requiredChapters)) })
   const ids = [...new Set([...(row?.dependencies ?? []), ...(row?.entryState == null && chapter > project.start ? [chapter - 1] : [])])].sort((a, b) => a - b)
   const linkedChapters = []
   for (const id of ids) {
     const version = latest(project, id)
     linkedChapters.push({ chapter: id, version: version?.version ?? null, path: version?.path ?? null,
-      stamp: version ? await optionalStamp(local(root, version.path)) : null, exitState: project.chapters[id]?.exitState ?? null })
+      stamp: version ? await optionalStamp(local(root, version.path)) : null, exitState: currentExitState(project, id) })
   }
-  return { mode: project.mode, records: dependencies(project, chapter), outline: existsSync(local(root, path)) ? await stamp(local(root, path)) : null,
+  const document = outlineDocument(outlines.outline.text)
+  const required = new Set([chapter, ...(row?.dependencies ?? []), ...outlineReferences(document, chapter)])
+  return { mode: project.mode, records: dependencies(project, chapter), outline: existsSync(local(root, path)) ? {
+    ...await stamp(local(root, path)), path: portable(root, path), text: outlineBasis(outlines.outline.text, required) } : null,
     ...(documentBindings.length ? { documents: documentBindings } : {}),
     ...(relatedOutlines.length ? { relatedOutlines } : {}),
     ...(outlines.missingRelatedChapters.length ? { missingRelatedChapters: outlines.missingRelatedChapters } : {}),
     lengthPolicy: { words: project.words, ...project.length },
     mapping: { sourceIds: row?.sourceIds ?? [], treatment: row?.treatment ?? '待核对', dependencies: row?.dependencies ?? [] },
-    entryState: row?.entryState ?? null, exitState: row?.exitState ?? null, linkedChapters,
+    entryState: row?.entryState ?? null, exitState: currentExitState(project, chapter), linkedChapters,
     exceptions: (project.exceptions ?? []).filter(x => x.status === 'approved' && x.from <= chapter && x.to >= chapter).map(x => ({ id: x.id, revision: x.revision })),
     source: project.source ? { path: project.source.path, indexed: project.source.stamp, current: await optionalStamp(local(root, project.source.path)) } : null }
+}
+export function sameContract(left, right) {
+  const outlineText = text => {
+    const { lines, headings } = outlineDocument(text)
+    if (!headings.length) return text
+    const prefaceEnd = headings[0].start
+    return lines.map((line, index) => index >= prefaceEnd ? line : line
+      .replace(/^(\d{4}-\d{2}-\d{2}复核并细化。原章范围 \d+—\d+；当前明确需修改)\d+(处，本册展示)\d+(个执行条目（含沿用接续卡）。)$/, '$1…$2…$3')
+      .replace(/^(本文件是执行细纲，不是已完成正文。原文摘要用于对照，新增因果用于改编；当前正文落盘至)\d+(章。)$/, '$1…$2')).join('\n')
+  }
+  const normalize = (value, other) => {
+    if (!value) return value
+    let outline = value.outline
+    if (outline) {
+      const { path, text, ...stamp } = outline
+      outline = typeof text === 'string' && typeof other?.outline?.text === 'string' ? { path, text: outlineText(text) } : stamp
+    }
+    return { ...value, outline, ...(value.relatedOutlines ? { relatedOutlines: value.relatedOutlines.map(entry => {
+      const previous = other?.relatedOutlines?.find(item => item.path === entry.path), { text, ...metadata } = entry
+      return typeof text === 'string' && typeof previous?.text === 'string' ? { path: entry.path, text: outlineText(text) } : metadata
+    }) } : {}) }
+  }
+  return JSON.stringify(normalize(left, right)) === JSON.stringify(normalize(right, left))
 }
 export function lengthInfo(project, chapter, words) {
   const ids = project.chapters[chapter]?.sourceIds ?? (project.source?.chapters[chapter] ? [chapter] : [])

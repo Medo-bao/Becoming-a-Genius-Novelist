@@ -1,0 +1,15 @@
+{
+  "name": "tiancai-novel-local",
+  "plugins": [
+    {
+      "name": "tiancai-novel",
+      "source": "./",
+      "version": "1.0.3",
+      "description": "仅在明确调用本插件后，由六岗位子代理诊断、制作、复核并交付小说。普通写小说请求不自动触发。",
+      "displayName": "我要成为天才小说作家",
+      "displayName_i18n": { "zh-CN": "我要成为天才小说作家" },
+      "description_i18n": { "zh-CN": "仅在明确调用本插件后，由六岗位子代理诊断、制作、复核并交付小说。普通写小说请求不自动触发。" },
+      "category": "productivity"
+    }
+  ]
+}

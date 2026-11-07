@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, relative, resolve } from 'node:path'
 import { textFile, pad } from './project.mjs'
-import { safePath } from './paths.mjs'
+import { safePath, inside } from './paths.mjs'
 
 const pointer = '完整内容见 UTF-8 阅读文件：'
 const reference = value => typeof value === 'string' && value.startsWith(pointer) ? value.slice(pointer.length) : null
@@ -19,7 +19,8 @@ export function readingText(text) {
 export async function buildReviewReadings(root, directory, packets) {
   const task = await safePath(root, directory), loaded = [], usage = new Map(), texts = new Map()
   const read = async path => {
-    path = await safePath(task, path)
+    path = await safePath(root, path)
+    if (!inside(task, path) && !inside(resolve(root, '.novel-workshop/batches'), path)) throw new Error('复核输入必须位于本任务或本项目只读共享材料目录')
     if (!texts.has(path)) texts.set(path, await textFile(path))
     return texts.get(path)
   }

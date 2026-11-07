@@ -1,10 +1,10 @@
 # 我要成为天才小说作家 · Genius Novelist in the Making
 
-自动诊断小说制作状况，在一个主会话中派六岗位子代理持续完成原创/改编的规划、写作、复审、返修与交付。队长只编排与收集，正文由文笔子代理创作，减少作者逐章主动对话。
+自动诊断小说制作状况，在一个主会话中派六岗位子代理持续完成原创/改编的规划、写作、复审、返修与交付。队长编排、分流并经受限入口处理明确微修，正文由文笔子代理创作，减少作者逐章主动对话。
 
-当前版本 **1.0.2**（2026-10-28）。包含Codex适配修复、首稿质量与复核读取优化、自动归档及既有DSH功能；本次完整变更见[1.0.2发布说明](docs/1.0.2发布说明.md)。
+当前版本 **1.0.3**。支持 Codex、DSH 和 ZCode，提供合并交接、同批共享材料、队长分流、受限微修和小批次逐章提交。详见[1.0.3 发布说明](docs/1.0.3发布说明.md)。
 
-2026-10-28 Codex适配补充：修正项目级CLI定位与首次子代理绑定顺序，阻止同一代理同时接两张未收件任务；持续等待、收件派单及原报告回修指引同步，详见[Codex适配核查](docs/Codex适配.md)。版本仍为1.0.2。
+2026-10-28 Codex适配补充：修正项目级CLI定位与首次子代理绑定顺序，阻止同一代理同时接两张未收件任务；持续等待、收件派单及原报告回修指引同步，详见[Codex 适配](docs/Codex适配.md)。版本仍为1.0.2。
 
 1.0.2 dsh3补充：复核报告保存即预检，字段/连续引文错误由原代理修同一报告；收件后在本会话当前明确scope内自动启动下一岗位，暂停、中止和只读切断续作。避免报告作废后整批重审及等待作者催促；详见[使用说明](docs/使用说明.md)。
 
@@ -14,26 +14,28 @@
 
 接手现有文档时按用途、标题和目录检索，复用人物、世界、大纲、文风及分册细纲；多份候选先分析再绑定。策划原位补充，已有成果完整时不新增文件，同用途新文档需说明原因。
 
-2026-10-27 Codex修复：消除跨Python/Node的时间戳精度假警报，区分历史提示与当前依赖；原生入口与任务提供真实runtime路径，--compact精简收件并返回下一步，状态按真实篇幅政策显示。调用限制保持。
+Codex 1.0.2 修复：消除跨Python/Node的时间戳精度假警报，区分历史提示与当前依赖；原生入口与任务提供真实runtime路径，--compact精简收件并返回下一步，状态按真实篇幅政策显示。调用限制保持。
 
 ## 使用
 
 Codex仅在明确调用`$tiancai-novel`、点选本插件或明确要求使用「我要成为天才小说作家」插件后运行。普通写小说、续写、精修、查看进度或使用其他插件不触发；旧项目登记和scope不构成新任务的调用授权。安装插件本身不启动制作。
 
-原生Codex插件安装：
+在 Codex 中注册源码根目录。
 
 ```powershell
-codex plugin marketplace add "<解压后的插件绝对目录>"
+codex plugin marketplace add "<源码根目录的绝对路径>"
 codex plugin add tiancai-novel@tiancai-novel-local
 ```
 
 安装后新开聊天即可明确调用；若尚未刷新，在方便时重启Codex。原生版直接使用内置CLI，不必先部署到小说项目。项目级安装方式仍见下文，调用策略相同。
 
+原生ZCode插件安装：在ZCode客户端 Plugin Marketplace → 添加 → 「添加插件市场」，粘贴本仓库绝对目录（或GitHub仓库地址），在市场下安装「我要成为天才小说作家」，新开聊天后点选`tiancai-novel`技能或明确要求使用本插件。详见[ZCode适配](docs/ZCode适配.md)。安装只登记插件，不启动制作。
+
 目标完成后会自动分类归档过程资料，清单入口在00-状态.md。任务产物、临时草稿、复核草案、阅读回执及已登记的清理记录分别保存；正式正文、现行规划、报告、成书和当前引用保留。可用archive --preview只读预览，或config设置autoArchive=false关闭自动归档。
 
 仅读取资料/确认进度支持doctor --inspect，DSH用options.inspect=true；明确继续制作后inspect=false。已登记数字TXT采用稿按真实登记版本识别，旧版通过与当前稿待验分别报告。
 
-支持缩小范围保留有效任务、跨章影响范围归并、整册细纲范围绑定、完整必读清单、草稿文件直接交稿、复核模板精简及既有进度文档自动同步。集中修改后计量，减少重复派单和全文回抄。
+缩小范围时会保留有效任务，并按实际影响范围登记跨章问题。支持整册细纲范围绑定、必读清单、草稿文件交稿和进度文档同步。集中修改后计量，减少重复派单和全文回抄。
 
 在本项目目录安装到小说项目：
 
@@ -41,10 +43,10 @@ codex plugin add tiancai-novel@tiancai-novel-local
 node bin/install.mjs --target codex --dir "E:\小说\新书"
 ```
 
-源码仓库：[Becoming-a-Genius-Novelist](https://github.com/Medo-bao/Becoming-a-Genius-Novelist)。下载发行包并解压，或使用 Git：
+可下载 [v1.0.3 源码归档](https://github.com/Medo-bao/Becoming-a-Genius-Novelist/releases/tag/v1.0.3)，也可使用 Git 获取源码。
 
 ```powershell
-git clone https://github.com/Medo-bao/Becoming-a-Genius-Novelist.git tiancai-novel
+git clone --branch v1.0.3 https://github.com/Medo-bao/Becoming-a-Genius-Novelist.git tiancai-novel
 cd tiancai-novel
 ```
 
@@ -58,13 +60,13 @@ $tiancai-novel 自动诊断当前项目，按现有计划继续制作至第30章
 
 首次检查模式、计划章号、篇幅政策、审查间隔是否已有明确来源；已有资料直接沿用，未规定的项集中一次询问并保存。初始化默认值不会静默变成作者要求。
 
-DSH中安装本地bundle后，新会话选择同名预设：
+在 DSH 插件管理器安装本地源码目录，再在新会话选择同名预设。
 
 ```text
-plugin_manager action=install_bundle target="<解压后的插件绝对目录>"
+plugin_manager action=install_bundle target="<源码根目录的绝对路径>"
 ```
 
-DSH与Codex共用制作核心。DSH队长使用专用novel_workshop工具，移除通用shell、直接文件写入、手动subagent/workflow及send_message入口；dispatch自动建单、启动全新岗位worker并绑定真实ID，收件后直接返回下一步诊断。worker提供五个文件工具与受限novel_draft计量，只能写当前任务目录，实际读完任务材料后才可提交。Codex继续使用原生子代理与CLI，工具权限由Codex宿主控制。ZCode专门适配留待后续，原始入口保留。
+DSH与Codex、ZCode共用制作核心。DSH队长使用专用novel_workshop工具，移除通用shell、直接文件写入、手动subagent/workflow及send_message入口；dispatch自动建单、启动全新岗位worker并绑定真实ID，收件后直接返回下一步诊断。worker提供五个文件工具、受限novel_draft计量与批次novel_submit提交，只能写当前任务目录，实际读完任务材料后才可提交。Codex继续使用原生子代理与CLI，工具权限由Codex宿主控制。ZCode使用ZCode专用技能，队长以原生Agent/SendMessage派六岗子代理并绑定真实ID（`--runtime zcode-native-v1`），工具权限由ZCode宿主控制，详见[ZCode适配](docs/ZCode适配.md)。
 
 从旧版升级DSH时重新安装bundle并重启，再启动新worker；旧会话不会自动获得新工具配置。无需重写既有章稿，应导入后补做独立复核。
 
@@ -96,7 +98,7 @@ CLI不调用外部模型；DSH或Codex的原生子代理执行创作和语义判
 
 权威状态为 `.novel-workshop/project.json`，人类可读状态和当前要求摘要自动生成。程序位于 `bin/`，共用流程位于 `core/`，宿主入口位于 `adapters/`。
 
-详见[使用说明](docs/使用说明.md)、[Codex适配](docs/Codex适配.md)、[派单协议](core/派单.md)、[自动制作协议](core/自动制作.md)、[1.0.0发布说明](docs/1.0.0发布说明.md)、[迭代记录](docs/迭代记录.md)。
+详见[使用说明](docs/使用说明.md)、[Codex适配](docs/Codex适配.md)、[ZCode适配](docs/ZCode适配.md)、[派单协议](core/派单.md)、[自动制作协议](core/自动制作.md)、[1.0.0发布说明](docs/1.0.0发布说明.md)、[迭代记录](docs/迭代记录.md)。
 
 ## 许可
 

@@ -5,9 +5,11 @@ import { runtime } from '../../bin/runtime.mjs'
 import * as P from '../../bin/project.mjs'
 import * as T from '../../bin/tasks.mjs'
 import * as W from '../../bin/production.mjs'
-import { DSH_RUNTIME } from './materials.mjs'
+import * as F from '../../bin/workflow.mjs'
+import { withProjectTransaction } from '../../bin/transaction.mjs'
+import { DSH_RUNTIME, hasRetainedReadings } from './materials.mjs'
 
-const commands = ['doctor', 'documents', 'init', 'import', 'config', 'scope', 'source', 'gate', 'map', 'record', 'calibrate', 'checkpoint', 'check', 'merge', 'dispatch', 'collect', 'correct-result', 'task', 'archive']
+const commands = ['doctor', 'documents', 'init', 'import', 'config', 'scope', 'source', 'gate', 'map', 'record', 'calibrate', 'checkpoint', 'check', 'merge', 'dispatch', 'collect', 'correct-result', 'advance', 'triage', 'microfix', 'task', 'archive']
 const readOnly = new Set(['doctor', 'documents', 'check', 'task'])
 const string = { type: 'string' }, number = { type: 'integer', description: '≥0' }, boolean = { type: 'boolean' }
 const list = { type: 'array', items: number, description: '至少一项；空数组不要传' }
@@ -22,10 +24,11 @@ const config = object({ mode: choice(['原创', '改编精修']), plan: object({
 config.properties.outlines = { type: 'array', description: '按当前执行依据一次绑定整册/范围，逐章map优先于此绑定',
   items: object({ path: string, ...span, source }, ['path', 'from', 'to']) }
 config.properties.progressFiles = { type: 'array', items: string, description: '已有进度MD文档；程序原位同步当前状态，空数组停用，保留历史原文' }
+config.properties.writeBatchSize = { type: 'integer', enum: [1, 2, 3], description: '默认3；长章或上下文不足用1，不改变复审间隔' }
 config.properties.autoArchive = { type: 'boolean', description: '默认true，目标完成后自动分类归档过程资料；false仅关闭自动归档，仍可手动archive' }
 for (const name of ['minRatio', 'maxRatio']) config.properties.length.properties[name] = { oneOf: [{ type: 'number' }, { type: 'null' }], description: '作者规定的非负比例；未规定传null' }
 const specs = {
-  doctor: { options: object({ fix: { type: 'boolean', description: '修复登记；必须放在options内，inspect=true时不能使用' },
+  doctor: { options: object({ fix: { type: 'boolean', description: '修复登记；必须放在options内，inspect=true时不能使用' }, adopted: { type: 'string', description: '与fix一同使用，指定已核实的采用表JSON，按chapters各条目的file处理旧稿撞号' },
     inspect: { type: 'boolean', description: '新请求仅读取资料/确认进度时设true，不改登记或派单；作者明确要求恢复制作后设false。同一制作任务中的普通进度提问不切换此模式。' } }) },
   documents: { options: object({ kind: choice(['idea', 'world', 'characters', 'outline', 'style', 'synopsis', 'notes', 'experience', 'chapters', 'source']), query: string, offset: number, limit: { type: 'integer', description: '≥1' } }) },
   init: { options: object({ title: string, mode: choice(['原创', '改编精修']), start: number, end: number, chapters: number, words: number,
@@ -50,7 +53,12 @@ const specs = {
   merge: { options: object({ artifact: choice(['adaptation', 'source', 'analysis']), edition: choice(['partial', 'final']), ...span, format: string }) },
   dispatch: { options: object({ role: choice(['主编', '世界', '人物', '剧情', '文笔', '复核']),
     action: choice(['plan', 'capture-requirements', 'decision', 'facts', 'outline', 'map-source', 'calibrate', 'write', 'repair', 'repair-length', 'repair-format', 'finish', 'review', 'final-review']),
-    chapter: number, chapters: list, ...span, review: { type: 'string', description: '仅calibrate对应的已登记审阅ID，不是额外提示词' } }, ['role', 'action']), required: ['options'] },
+    chapter: number, chapters: list, ...span, microfix: string, issueIds: { type: 'array', items: string }, review: { type: 'string', description: '仅calibrate对应的已登记审阅ID，不是额外提示词' } }, ['role', 'action']), required: ['options'] },
+  advance: { options: object({ id: string }) },
+  triage: { data: object({ review: string, decisions: { type: 'array', items: object({ id: string, route: choice(['ignore', 'micro', 'repair', 'plan', 'clarify', 'author']), kind: choice(['format', 'punctuation', 'typo']), reason: string }, ['id', 'route', 'reason']) } }, ['review', 'decisions']), required: ['data'] },
+  microfix: { data: object({ issue: string, issues: { type: 'array', items: string }, version: number,
+    format: object({ heading: choice(['plain', 'markdown']), indent: choice(['none', 'fullwidth']) }),
+    patches: { type: 'array', items: object({ issue: string, before: string, after: string, reason: string, authority: object({ path: string, quote: string }, ['path', 'quote']) }, ['issue', 'before', 'after']) } }, ['version']), required: ['data'] },
   collect: { options: object({ id: string }, ['id']), required: ['options'] },
   'correct-result': { options: object({ id: { type: 'string', description: '原running复核任务ID；仅回叫原执行者修结果字段/连续引文，不重派冷读' } }, ['id']), required: ['options'] },
   task: { options: object({ id: string, status: choice(['failed', 'cancelled']), reason: string }) },
@@ -128,19 +136,7 @@ const examples = {
   source: { action: 'source', options: { file: 'docs/正式小说底本.txt', encoding: 'utf-8' } },
   config: { action: 'config', data: { outlines: [{ path: 'docs/现行分册细纲.md', from: 481, to: 483 }], source: '当前要求明确采用此册' } },
 }
-function publicResult(result) {
-  if (!result?.id?.startsWith('job-')) return result
-  const { id, directory, role, action, chapters, scopeRevision, status, agent, runtime, reason, promptPath, resultPath, contextPath, archive, archivedIn } = result
-  const value = { id, directory, role, action, chapters, scopeRevision, status, agent, runtime, reason, promptPath, resultPath, contextPath,
-    ...(archive ? { archive } : {}), ...(archivedIn ? { archivedIn } : {}) }
-  if (result.output) {
-    const { path, version, length, review } = result.output
-    value.output = { path, version, length, ...(result.output.receipts ? { registeredChapters: result.output.receipts.map(row => row.chapter) } : {}), ...(review ? { review: { id: review.id, verdict: review.verdict,
-      chapters: review.chapters.map(row => ({ chapter: row.chapter, version: row.version, verdict: P.rowVerdict(review, row) })), issues: review.issues.length,
-      resolved: review.resolutions?.filter(item => item.status === 'resolved').map(item => item.id) ?? [] } } : {}) }
-  }
-  return value
-}
+const publicResult = T.publicTask
 // 保持CLI原有JSON输出语义；旧台账缺项、记录history中的undefined不能直接进入宿主typed结果。
 const jsonValue = value => JSON.parse(JSON.stringify(value))
 
@@ -161,6 +157,7 @@ function options(argv, flags) {
 export function registerWorkshop(ctx) {
   const inspecting = new WeakSet()
   const continuing = new WeakMap()
+  const workers = new Map(), runs = new Map(), queues = new Map(), endedRuns = new Set()
   const definition = {
     name: 'novel_workshop',
     description: '小说工坊专用入口。仅查资料/确认进度用doctor options.inspect=true，只读汇报不恢复旧任务；明确恢复制作后inspect=false。doctor修复用options.fix=true，不能放根级。documents检索、config绑定已有资料；scope保存真实作者范围；dispatch启动岗位worker，完成后collect续作。',
@@ -183,7 +180,14 @@ export function registerWorkshop(ctx) {
       if (args.action === 'doctor' && flags.inspect === false) inspecting.delete(parent.session)
       const preview = args.action === 'archive' && flags.preview === true
       const mutation = !readOnly.has(args.action) && !preview || args.action === 'doctor' && flags.fix === true || args.action === 'task' && flags.status !== undefined
-      if (inspecting.has(parent.session) && mutation) throw new Error('本会话当前仅确认进度，不执行修复登记、scope、派单或收件；待作者明确恢复制作后doctor options.inspect=false，再按真实授权继续')
+      if (inspecting.has(parent.session) && mutation && !exec.novelCompletion) throw new Error('本会话当前仅确认进度，不执行修复登记、scope、派单或收件；待作者明确恢复制作后doctor options.inspect=false，再按真实授权继续')
+      if (mutation && exec.transactionRoot !== root) return withProjectTransaction(root, () => definition.execute(args, { ...exec, transactionRoot: root }))
+      if (exec.novelCompletion && args.action === 'collect') {
+        const state = await P.load(root), job = state.jobs.find(row => row.id === flags.id), worker = workers.get(exec.novelCompletion.agent)
+        if (inspecting.has(parent.session) || continuing.get(parent.session)?.get(root) !== state.scope.revision ||
+            job?.status !== 'running' || job.id !== exec.novelCompletion.jobId || job.agent !== exec.novelCompletion.agent || job.scopeRevision !== state.scope.revision ||
+            worker?.root !== root || worker.jobId !== job.id || worker.revision !== state.scope.revision) return { ignored: true }
+      }
       const argv = [args.action, root]
       const { automatic, ...scopeFlags } = flags
       options(argv, args.action === 'scope' ? scopeFlags : flags)
@@ -191,6 +195,12 @@ export function registerWorkshop(ctx) {
       if (args.action === 'task' && flags.status === 'failed') {
         const job = (await P.load(root)).jobs.find(job => job.id === flags.id)
         if (job?.resultCorrection?.pending) throw new Error('原复核代理正在回修结果，先等完成通知后collect；作者取消时用scope pause或明确cancelled，不把字段回修冒充执行失败')
+      }
+      if (args.action === 'advance') {
+        if (flags.id) return definition.execute({ action: 'collect', project: root, options: { id: flags.id } }, exec)
+        const diagnosis = await W.diagnose(root, await P.load(root))
+        if (!diagnosis.nextAction.requiresUser && diagnosis.nextAction.call?.action === 'dispatch') return definition.execute({ ...diagnosis.nextAction.call, project: root }, exec)
+        return jsonValue({ diagnosis, instruction: '按当前nextAction处理队长分流、微修或真实阻塞；没有启动岗位。' })
       }
       if (args.action === 'dispatch') {
         const project = await P.load(root)
@@ -200,21 +210,35 @@ export function registerWorkshop(ctx) {
           await T.updateTask(root, project, { id: job.id, status: 'cancelled', reason: '旧宿主任务未通过当前DSH派单入口，保留产物后重新派发' })
           job = await T.dispatch(root, project, { ...flags, chapters: flags.chapters === undefined ? undefined : String(flags.chapters).split(',') })
         }
-        const current = project.jobs.find(item => item.id === job.id), childId = randomUUID()
+        const current = project.jobs.find(item => item.id === job.id)
+        const candidate = F.reusableAgent(project, current, DSH_RUNTIME)
+        const previous = candidate && ctx.agents.get(candidate)
+        const reused = previous?.session?.header?.parentSession === parent.session.header.id ? previous : null
+        const childId = reused ? candidate : randomUUID()
         current.runtime = DSH_RUNTIME
         current.parentSession = parent.session.header.id
         await T.updateTask(root, project, { id: job.id, status: 'running', agent: childId })
+        if (current.microfix && reused) {
+          const source = project.jobs.find(row => row.id === project.microfixes.find(fix => fix.id === current.microfix)?.sourceTask)
+          if (source && await hasRetainedReadings(reused.session, root, source)) await T.useMicroDelta(root, project, current, { contextRetained: true })
+        }
+        job = T.taskInfo(root, current)
+        workers.set(childId, { root, parentId: parent.session.header.id, jobId: job.id, revision: project.scope.revision })
         try {
+          if (reused) {
+            await ctx.subagents.sendMessage(parent, childId, [{ type: 'text', text: `同批同岗位续单已绑定：${job.id}，项目${root}。原单已收件，不重叠执行。只处理本单，不切换岗位。\npromptPath：${job.promptPath}\ncontextPath：${job.contextPath}\nresultPath：${job.resultPath}\n真实读取新prompt/context和变化材料；自己已完整读过且时间戳未变的共享材料可复用，未读或上下文丢失必须读全。小批次使用novel_submit逐章提交并读取返回的下一章材料，不一次性提交多章JSON。` }], { signal: exec.signal })
+          } else {
           const activation = await ctx.subagents.startActivation({ childId, provider: 'spawn', label: `${job.id} · ${job.role} · ${job.action}`,
             request: { parent, cwd: root, agentPreset: 'tiancai-novel-worker', maxDepth: ctx.subagents.resolveMaxDepth(1),
-              prompt: [{ type: 'text', text: `项目：${root}\n任务已绑定你的真实ID。只完成这一单；实际read以下输入后再写结果，不接受内联材料或在聊天交正文。\npromptPath：${job.promptPath}\ncontextPath：${job.contextPath}\nresultPath：${job.resultPath}\n按任务单、岗位卡与context.json的requiredReads完整读取；复核任务优先reviewReadings/sharedReviewReading，不再逐份重复已整合的packets/textFiles。材料或工具不可用即报告阻塞，不凭记忆补写、不转任复核、不自行接下一章。` }] },
+              prompt: [{ type: 'text', text: `项目：${root}\n任务已绑定你的真实ID。小批次用novel_submit逐章提交，每次读返回的新材料。只完成这一单；实际read以下输入后再写结果，不接受内联材料或在聊天交正文。\npromptPath：${job.promptPath}\ncontextPath：${job.contextPath}\nresultPath：${job.resultPath}\n按任务单、岗位卡与context.json的requiredReads完整读取；复核任务优先reviewReadings/sharedReviewReading，不再逐份重复已整合的packets/textFiles。材料或工具不可用即报告阻塞，不凭记忆补写、不转任复核、不自行接下一章。` }] },
             signal: exec.signal, delivery: 'parent' })
           if (activation.childId !== childId) throw new Error('宿主返回的子代理ID与预留绑定不一致')
+          }
         } catch (error) {
           await T.updateTask(root, await P.load(root), { id: job.id, status: 'failed', reason: `原生派单失败：${error.message}` })
           throw error
         }
-        return jsonValue({ result: publicResult(T.taskInfo(root, current)), waiting: true, instruction: '等待宿主完成通知后collect；不要睡眠轮询、发送追加正文要求或复用本worker写下一章' })
+        return jsonValue({ result: publicResult(T.taskInfo(root, current)), waiting: true, reused: Boolean(reused), instruction: '等待宿主完成事件自动收件与续派；无自动结果时collect恢复。批次逐章由novel_submit提交，勿重复派单或轮询。'  })
       }
       if (args.action === 'correct-result') {
         const project = await P.load(root), job = T.requireJob(project, flags.id, '复核', undefined, ['review', 'final-review'])
@@ -246,7 +270,7 @@ export function registerWorkshop(ctx) {
         }
         return jsonValue({ result: publicResult(T.taskInfo(root, job)), waiting: true, correction: { attempts, sameAgent: job.agent }, instruction: '原复核代理只回修原结果，等完成通知后collect；不取消旧单或新派整批冷读' })
       }
-      let advance = false
+      let advance = ['triage', 'microfix'].includes(args.action) && continuing.get(parent.session)?.get(root) === (await P.load(root)).scope.revision
       if (args.action === 'collect') {
         const project = await P.load(root), job = project.jobs.find(item => item.id === flags.id)
         if (!job || job.runtime !== DSH_RUNTIME && job.status !== 'completed') throw new Error('该单未通过当前DSH真实派单入口；保留旧产物，取消旧单后重新dispatch')
@@ -272,11 +296,12 @@ export function registerWorkshop(ctx) {
           }
         }
       }
-      const result = await run(argv, args.data)
+      const result = await run(argv, args.data, { transactionRoot: root })
       if (args.action === 'doctor' && flags.inspect === true) { inspecting.add(parent.session); continuing.delete(parent.session) }
       if (args.action === 'scope') {
         let roots = continuing.get(parent.session)
         if (!roots) continuing.set(parent.session, roots = new Map())
+        for (const worker of [...workers.values(), ...runs.values()]) if (worker.root === root && worker.parentId === parent.session.header.id && result.jobs?.kept.includes(worker.jobId)) worker.revision = result.revision
         if (automatic !== false && ['continue', 'revise', 'review'].includes(result.mode)) roots.set(root, result.revision)
         else roots.delete(root)
       }
@@ -296,6 +321,44 @@ export function registerWorkshop(ctx) {
       return jsonValue({ result: publicResult(result), diagnosis })
     },
   }
+  ctx.on('subagent/start', info => {
+    const worker = workers.get(info.id)
+    if (worker) runs.set(info.runId, { ...worker })
+  })
+  ctx.on('subagent/end', info => {
+    // 续单复用走followup，不保证再发subagent/start；按真实child id兜底，避免自动收件失效。
+    if (info.runId && endedRuns.has(info.runId)) return
+    const worker = runs.get(info.runId) ?? workers.get(info.id)
+    runs.delete(info.runId)
+    if (!worker) return
+    if (info.runId) endedRuns.add(info.runId)
+    if (info.stopReason !== 'completed') return
+    const previous = queues.get(worker.parentId) ?? Promise.resolve()
+    const operation = previous.catch(() => {}).then(async () => {
+      const parent = ctx.agents.get(worker.parentId), current = workers.get(info.id)
+      const revision = current?.jobId === worker.jobId ? current.revision : worker.revision
+      if (!parent || continuing.get(parent.session)?.get(worker.root) !== revision || inspecting.has(parent.session)) return
+      const project = await P.load(worker.root), job = project.jobs.find(row => row.id === worker.jobId)
+      if (project.scope.revision !== revision || job?.status !== 'running' || job.agent !== info.id) return
+      const value = await definition.execute({ action: 'collect', project: worker.root, options: { id: job.id } },
+        { agent: parent, signal: new AbortController().signal, novelCompletion: { agent: info.id, jobId: job.id } })
+      if (value?.ignored) return
+      // 只回传父会话继续所需的字段，避免把完整diagnosis/任务列表灌回上下文。
+      const summary = value && typeof value === 'object' ? {
+        ...(value.result !== undefined ? { result: value.result } : {}),
+        ...(value.waiting ? { waiting: true } : {}),
+        ...(value.continuation !== undefined ? { continuation: value.continuation?.result ?? value.continuation } : {}),
+        ...(value.diagnosis?.nextAction ? { nextAction: value.diagnosis.nextAction } : {}),
+        ...(value.error ? { error: value.error } : {}),
+        ...(value.instruction ? { instruction: value.instruction } : {}),
+      } : value
+      parent.inject?.({ id: randomUUID(), role: 'user', content: [{ type: 'text', text: `小说工坊完成事件已处理：${JSON.stringify(summary)}` }], source: { kind: 'novel-workshop' } })
+    }).catch(error => {
+      ctx.agents.get(worker.parentId)?.inject?.({ id: randomUUID(), role: 'user', content: [{ type: 'text', text: `小说工坊自动收件未完成：${worker.jobId}：${error.message}。保留产物，按具体缺口恢复。` }], source: { kind: 'novel-workshop' } })
+    })
+    queues.set(worker.parentId, operation)
+    return operation
+  })
   ctx.tools.register(definition)
   return (session, event) => {
     const aborted = event?.type === 'turn/end' && event.data?.reason?.kind === 'aborted'

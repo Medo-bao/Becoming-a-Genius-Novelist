@@ -2,14 +2,13 @@ import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile, readdir } from 'node:fs/promises'
 import { join, dirname } from 'node:path'
 import { local, portable, pad, integer, optional, textFile, stamp, optionalStamp, sameStamp, save, discover, scan, registerFiles,
-  chapterIds, latest, nextChapter, contract, relevant, lengthInfo, measure, chapterText, sourceSlices, versionValid, evidence,
-  missingParameters, calibrationTarget, repairStreaks, outlineContext, existingOutline, issueBlocks, issueRange, rowVerdict } from './project.mjs'
-import { requireJob } from './tasks.mjs'
+  chapterIds, latest, currentExitState, nextChapter, contract, sameContract, relevant, lengthInfo, measure, chapterText, sourceSlices, versionValid, evidence,
+  missingParameters, calibrationTarget, repairStreaks, outlineContext, existingOutline, issueBlocks, issueRange, rowVerdict, pendingTriage as findPendingTriage } from './project.mjs'
+import { requireJob, taskContinuation } from './tasks.mjs'
 import { safePath, managedPath } from './paths.mjs'
 import * as D from './documents.mjs'
 
 export const dimensions = project => ['符合要求', '剧情逻辑', '文字质量', ...(project.mode === '改编精修' ? ['改编符合性', '删改合理性', '文风一致性'] : [])]
-const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 export const inScope = (project, chapter) => chapter >= project.scope.from && chapter <= project.scope.to
 export function openIssues(project, chapter) {
   return project.issues.filter(x => x.status === 'open' && (chapter === undefined || x.from <= chapter && x.to >= chapter))
@@ -28,7 +27,7 @@ function awaitingVerification(project, chapter, issue) {
   const version = latest(project, chapter)
   const reviewed = latestIssueReview(project, chapter, issue)?.row.version ??
     project.chapters[chapter]?.versions.find(item => item.path === issue.evidence?.path)?.version
-  return version?.receipt && reviewed !== undefined && version.version > reviewed
+  return Boolean(version && reviewed !== undefined && version.version > reviewed)
 }
 export async function approvals(root, project, options = {}) {
   const approved = new Map(), invalid = []
@@ -42,7 +41,7 @@ export async function approvals(root, project, options = {}) {
       const version = project.chapters[row.chapter]?.versions.find(v => v.version === row.version)
       if (!contracts.has(row.chapter)) contracts.set(row.chapter, await contract(root, project, row.chapter, { outlineCache }))
       const valid = version && sameStamp(version.stamp, row.stamp) && await versionValid(root, version) &&
-        same(row.contract, contracts.get(row.chapter)) && !openIssues(project, row.chapter).some(issueBlocks)
+        sameContract(row.contract, contracts.get(row.chapter)) && !openIssues(project, row.chapter).some(issueBlocks)
       if (!valid) { invalid.push({ review: review.id, chapter: row.chapter }); continue }
       if (!approved.has(row.chapter) || row.version > approved.get(row.chapter).version) approved.set(row.chapter, { ...version, review: review.id })
     }
@@ -55,14 +54,14 @@ export async function dueBatch(root, project, approved, options = {}) {
   const reviewed = new Set()
   if (project.scope.mode === 'review') for (const review of project.reviews) for (const row of review.chapters) {
     const current = latest(project, row.chapter)
-    if (current?.version === row.version && await versionValid(root, current) && same(row.contract, await contract(root, project, row.chapter, { outlineCache })) &&
+    if (current?.version === row.version && await versionValid(root, current) && sameContract(row.contract, await contract(root, project, row.chapter, { outlineCache })) &&
       openIssues(project, row.chapter).every(issue => latestIssueReview(project, row.chapter, issue)?.review.id === review.id)) reviewed.add(row.chapter)
   }
   for (let from = project.scope.from; from <= project.scope.to; from += project.interval) {
     const to = Math.min(from + project.interval - 1, project.scope.to)
     const written = ids.filter(id => id >= from && id <= to)
     const pending = written.filter(id => project.scope.mode === 'review' ? !reviewed.has(id) : approved.get(id)?.version !== latest(project, id).version)
-    const verificationDue = pending.some(id => openIssues(project, id).some(issue => issueBlocks(issue) && awaitingVerification(project, id, issue)))
+    const verificationDue = pending.some(id => latest(project, id).receipt && openIssues(project, id).some(issue => issueBlocks(issue) && awaitingVerification(project, id, issue)))
     if (pending.length && (written.length === to - from + 1 || project.scope.mode !== 'continue' || verificationDue)) {
       const chapters = new Set(pending)
       if (project.scope.mode !== 'review') {
@@ -90,11 +89,17 @@ export async function diagnose(root, project = null) {
     result.plan = { start: project.start, end: project.end, positions: project.end - project.start + 1 }
     result.lengthPolicy = { ...project.length, ...(project.length.type === 'fixed' ? { words: project.words } : {}) }
   }
-  const call = action => {
+  const call = async action => {
     if (action.type === 'archive') return { action: 'archive' }
     if (action.type === 'reconcile') return { action: 'doctor', options: { fix: true } }
     if (action.type === 'finish') return { action: 'dispatch', options: { role: '文笔', action: 'finish', chapters: action.chapters.slice(0, project.interval) } }
-    if (['write', 'repair', 'repair-length', 'repair-format'].includes(action.type)) return { action: 'dispatch', options: { role: '文笔', action: action.type, chapter: action.chapters[0] } }
+    if (action.type === 'triage') return { action: 'triage', data: { review: action.review, decisions: [] } }
+    if (action.type === 'microfix') return { action: 'microfix', data: { issues: action.issues, version: action.version } }
+    if (action.type === 'micro-confirm') return { action: 'dispatch', options: { role: '复核', action: 'review', chapters: action.chapters, microfix: action.microfix } }
+    if (action.type === 'clarify') return { action: 'dispatch', options: { role: '复核', action: 'review', chapters: action.chapters } }
+    if (action.type === 'repair-plan') return { action: 'dispatch', options: { role: '剧情', action: 'plan', chapters: action.chapters, issueIds: action.issues } }
+    if (action.type === 'write') return { action: 'dispatch', options: { role: '文笔', action: 'write', chapters: await writingBatch(root, project, action.chapters[0]) } }
+    if (['repair', 'repair-length', 'repair-format'].includes(action.type)) return { action: 'dispatch', options: { role: '文笔', action: action.type, chapter: action.chapters[0] } }
     if (action.type === 'review') return { action: 'dispatch', options: { role: '复核', action: 'review', chapters: action.chapters } }
     if (action.type === 'plan') return { action: 'dispatch', options: { role: '主编', action: 'plan' } }
     if (action.type === 'outline') return { action: 'dispatch', options: { role: '剧情', action: 'outline', chapter: action.chapters[0] } }
@@ -104,10 +109,23 @@ export async function diagnose(root, project = null) {
     return null
   }
   for (const action of new Set([...(result.tasks ?? []), result.nextAction].filter(Boolean))) {
-    const next = call(action)
+    const next = await call(action)
     if (next) action.call = next
   }
   return result
+}
+export async function writingBatch(root, project, chapter) {
+  const size = project.writeBatchSize ?? 3, chapters = []
+  const end = Math.min(project.scope.to, project.scope.from + (Math.floor((chapter - project.scope.from) / project.interval) + 1) * project.interval - 1, chapter + size - 1)
+  for (let id = chapter; id <= end; id++) {
+    if (latest(project, id)) break
+    try {
+      if (!(await outlineContext(root, project, id)).outline.text?.trim() || project.length.type === 'source' &&
+          !project.chapters[id]?.sourceIds?.length && !project.source?.chapters[id] && project.chapters[id]?.treatment !== '新增') break
+    } catch (error) { if (error.code === 'DOCUMENT_CHOICE' && chapters.length) break; throw error }
+    chapters.push(id)
+  }
+  return chapters.length ? chapters : [chapter]
 }
 export function inspectReport(report) {
   const diagnostic = item => { const { call, ...value } = item; return value }
@@ -203,12 +221,31 @@ async function diagnoseState(root, project = null) {
     if (!existsSync(local(root, item.evidence.path)) || !sameStamp(item.evidence.stamp, await stamp(local(root, item.evidence.path)))) tasks.push({ type: 'refresh-evidence', records: [item.id], requiresUser: false, reason: '事实依据文件已变化，回查并更新记录，不沿用旧证据' })
   }
   const issues = project.issues.filter(x => x.status === 'open' && x.to >= scope.from && x.from <= scope.to)
-  const unresolved = issues.filter(x => x.requiresUser)
-  if (unresolved.length && scope.mode !== 'review') tasks.push({ type: 'decision', issues: unresolved.map(x => x.id), requiresUser: true, reason: '合并这些无法从现有证据判断的作者取舍，并给出推荐方案，一次询问' })
   const outsideScope = issues.filter(issue => issueBlocks(issue) && (issue.from < scope.from || issue.to > scope.to))
   if (outsideScope.length && scope.mode !== 'review') tasks.push({ type: 'review-scope', issues: outsideScope.map(issue => issue.id),
     ranges: outsideScope.map(({ id, from, to }) => ({ id, from, to })), requiresUser: true,
     reason: '阻塞问题的完整影响范围超出当前授权，局部复核不能关闭；先请作者确认覆盖这些范围的复核/修订授权，不自动越界或重复局部复核' })
+  const pendingTriage = findPendingTriage(project)
+  if (pendingTriage) tasks.push({ type: 'triage', review: pendingTriage.id, issues: (pendingTriage.triage.pendingIssues ?? pendingTriage.triage.issues).map(id => project.issues.find(issue => issue.id === id)).filter(issue => issue?.status === 'open' && issue.from >= scope.from && issue.to <= scope.to),
+    requiresUser: false, reason: '队长依据原报告逐项分流：可选建议、明确微修、实质返修、规划、原复核澄清或作者裁决；分流未完成不能自动派返修或报完成' })
+  const waitingFix = (project.microfixes ?? []).find(fix => fix.status === 'pending-confirmation' && inScope(project, fix.chapter))
+  const micros = scope.mode === 'review' ? [] : issues.filter(issue => issue.triage?.route === 'micro' && !(project.microfixes ?? []).some(fix => fix.issues.includes(issue.id)))
+  if (!pendingTriage && waitingFix) tasks.push({ type: 'micro-confirm', chapters: [waitingFix.chapter], microfix: waitingFix.id,
+    reviewer: waitingFix.reviewerAgent, requiresUser: false, reason: '先独立确认已提交的微修，再按当前版本分流余项；原阅读或依据失效时恢复完整读取' })
+  else if (!pendingTriage && micros.length) {
+    const first = micros[0], group = micros.filter(issue => issue.from === first.from && issue.triage.kind === first.triage.kind)
+    tasks.push({ type: 'microfix', chapters: [first.from], issues: group.map(issue => issue.id), version: latest(project, first.from)?.version,
+      kind: first.triage.kind, requiresUser: false, reason: '队长审定问题编号、唯一原句及依据后，经专用microfix执行；不能直接写正文或自行签认字词通过' })
+  }
+  const plans = issues.filter(issue => issue.triage?.route === 'plan')
+  if (scope.mode !== 'review' && !pendingTriage && plans.length) tasks.push({ type: 'repair-plan', chapters: [...new Set(plans.flatMap(issue => Array.from({ length: issue.to - issue.from + 1 }, (_, i) => issue.from + i)))],
+    issues: plans.map(issue => issue.id), requiresUser: false, reason: '先由剧情调整实际规划，再交文笔返修' })
+  const clarifications = issues.filter(issue => issue.triage?.route === 'clarify')
+  if (!pendingTriage && clarifications.length) tasks.push({ type: 'clarify', chapters: [...new Set(clarifications.flatMap(issue => Array.from({ length: issue.to - issue.from + 1 }, (_, i) => issue.from + i)))],
+    issues: clarifications.map(issue => issue.id), requiresUser: false, reason: '原复核补充、澄清或依实际证据撤回判断；队长不能自行降级实质阻塞' })
+
+  const unresolved = issues.filter(x => x.requiresUser)
+  if (unresolved.length && scope.mode !== 'review') tasks.push({ type: 'decision', issues: unresolved.map(x => x.id), requiresUser: true, reason: '合并这些无法从现有证据判断的作者取舍，并给出推荐方案，一次询问' })
   if (scope.mode === 'review') diagnostics.push(...issues.map(x => ({ type: 'reported-issue', id: x.id, requiresUser: x.requiresUser, status: x.status })))
   const rounds = project.maxRepairRounds ?? 3
   const tripped = repairStreaks(project).filter(chapter => {
@@ -221,11 +258,11 @@ async function diagnoseState(root, project = null) {
   const pendingExceptions = project.exceptions.filter(x => x.status === 'pending' && x.to >= scope.from && x.from <= scope.to)
   if (pendingExceptions.length && scope.mode !== 'review') tasks.push({ type: 'exception-decision', exceptions: pendingExceptions.map(x => x.id), requiresUser: true,
     reason: '破格申请待裁决：逐条给出代价、影响范围与推荐选项，用户确认后记录 approved / rejected 与依据' })
-  const repairs = issues.filter(x => !x.requiresUser && issueBlocks(x))
+  const repairs = issues.filter(x => !x.requiresUser && issueBlocks(x) && !['micro', 'plan', 'clarify'].includes(x.triage?.route))
   if (repairs.length && scope.mode !== 'review') tasks.push({ type: 'repair', chapters: [...new Set(repairs.flatMap(x => Array.from({ length: x.to - x.from + 1 }, (_, i) => x.from + i)))],
     issues: repairs.map(x => x.id), requiresUser: false, reason: '在已授权范围内自行返修明确问题，完成后局部复验' })
   for (const task of tasks.filter(x => x.type === 'repair')) {
-    task.chapters = task.chapters.filter(id => inScope(project, id) && repairs.some(issue => issue.from <= id && issue.to >= id && !awaitingVerification(project, id, issue)))
+    task.chapters = task.chapters.filter(id => inScope(project, id) && repairs.some(issue => issue.from <= id && issue.to >= id && !awaitingVerification(project, id, issue))).sort((a, b) => a - b)
     task.issues = repairs.filter(issue => task.chapters.some(id => issue.from <= id && issue.to >= id)).map(issue => issue.id)
     if (!task.chapters.length) tasks.splice(tasks.indexOf(task), 1)
   }
@@ -234,7 +271,9 @@ async function diagnoseState(root, project = null) {
   }
   if (project.mode === '改编精修' && !project.requirements.some(x => x.status === 'active')) tasks.push({ type: 'capture-requirements', requiresUser: false, reason: '从现行要求、目标变更与计划中提取有效要求，保留来源和替代关系；不把执行者自述当用户批准' })
   const unfinished = ids.filter(id => inScope(project, id) && !latest(project, id).receipt)
-  if (unfinished.length) tasks.push({ type: 'finish', chapters: unfinished, requiresUser: false, reason: '按审查间隔批量读回这些章的当前正文，只补两更和出章状态；不重写或顺带修稿，补登记不等于复核通过' })
+  if (unfinished.length && scope.mode === 'review') diagnostics.push({ type: 'missing-receipt', chapters: unfinished, requiresUser: false,
+    reason: '只审范围可登记实读的问题及待验收结论；当前稿缺两更，补录和正式通过须另有制作授权' })
+  else if (unfinished.length) tasks.push({ type: 'finish', chapters: unfinished, requiresUser: false, reason: '按审查间隔批量读回这些章的当前正文，只补两更和出章状态；不重写或顺带修稿，补登记不等于复核通过' })
   if (tasks.some(task => task.type === 'select-document')) return { title: project.title, scope, documents, ...progress,
     stage: tasks[0].type, diagnostics, tasks, nextAction: tasks[0] }
   const batch = await dueBatch(root, project, approved, { outlineCache })
@@ -274,8 +313,8 @@ async function diagnoseState(root, project = null) {
     nextAction = { type: 'archive', requiresUser: false, reason: '当前目标已完成，自动分类归档过程资料后结束；正式文件与当前引用保留原位' }
   }
   const active = (project.jobs ?? []).filter(x => ['pending', 'running'].includes(x.status) && x.scopeRevision === scope.revision)
-  if (active.length && !tasks.some(x => x.requiresUser)) nextAction = { type: 'collect', jobs: active.map(x => ({ id: x.id, role: x.role, agent: x.agent, status: x.status,
-    result: local(root, `${x.directory}/result.json`) })), requiresUser: false, reason: '继续或等待已有子代理任务并收集结果；不要重复派发或在队长上下文代写' }
+  if (active.length && !tasks.some(x => x.requiresUser)) nextAction = { type: 'collect', jobs: active.map(job => taskContinuation(root, job)),
+    requiresUser: false, reason: '按每张单的 next 启动、核验收件、逐章提交或确认原生执行者状态' }
   return { title: project.title, stage: nextAction.type, written: ids.length, planned: project.end - project.start + 1,
     nextChapter: next, latestApproved: ids.filter(id => approved.get(id)?.version === latest(project, id).version).length,
     scope, documents, ...progress, archive: project.archives?.at(-1) ? { index: project.archives.at(-1).index, files: project.archives.at(-1).files } : null,
@@ -290,7 +329,7 @@ export async function finalApproved(root, project) {
   if (!record || record.chapters.length !== project.end - project.start + 1) return false
   const { approved } = await approvals(root, project)
   for (const row of record.chapters) {
-    if (latest(project, row.chapter)?.version !== row.version || approved.get(row.chapter)?.version !== row.version || !same(row.contract, await contract(root, project, row.chapter))) return false
+    if (latest(project, row.chapter)?.version !== row.version || approved.get(row.chapter)?.version !== row.version || !sameContract(row.contract, await contract(root, project, row.chapter))) return false
   }
   return !openIssues(project).some(issueBlocks)
 }
@@ -312,6 +351,8 @@ export async function context(root, project, chapter, options = {}) {
     lessons.set(item.id.match(/^E_(\d+)_\d+$/)?.[1] ?? item.id, item)
   }
   const dependencies = await contract(root, project, chapter, { outlineContext: outlines })
+  if (dependencies.outline) { const { text, ...metadata } = dependencies.outline; dependencies.outline = metadata }
+  if (dependencies.relatedOutlines) dependencies.relatedOutlines = dependencies.relatedOutlines.map(({ text, ...metadata }) => metadata)
   if (project.length.type === 'source') {
     // 保留内部历史审阅契约的形状，仅去掉给模型看的无效固定字数占位。
     const { words, ...policy } = dependencies.lengthPolicy
@@ -327,7 +368,7 @@ export async function context(root, project, chapter, options = {}) {
     issues: openIssues(project, chapter),
     resolvedIssues: project.issues.filter(issue => issue.status === 'resolved' && issue.from <= chapter && issue.to >= chapter)
       .map(({ id, text, resolution, evidence }) => ({ id, text, resolution, evidence })),
-    entryState: row?.entryState ?? project.chapters[chapter - 1]?.exitState ?? null,
+    entryState: row?.entryState ?? currentExitState(project, chapter - 1),
     previous: previous ? { path: local(root, previous.path), tail: previousText.slice(-2500), timeTransitions,
       readingNote: '时间转场为前章段首原句摘录，尾段不是全章；回指中段事件时对照这些位置，必要时按path和line读相关上下文，不把摘录当自动时间判定。' } : null,
     experience: [...lessons.values()].slice(-8),
@@ -338,7 +379,7 @@ export async function context(root, project, chapter, options = {}) {
 }
 export async function assertWriteReady(root, project, chapter, report = null) {
   report ??= await diagnose(root, project)
-  const blocker = (report.tasks ?? []).find(x => x.requiresUser || ['restore-source', 'reindex-source', 'index-source', 'refresh-evidence'].includes(x.type) ||
+  const blocker = (report.tasks ?? []).find(x => x.requiresUser || ['restore-source', 'reindex-source', 'index-source', 'refresh-evidence', 'triage'].includes(x.type) ||
     ['reconcile', 'repair-record'].includes(x.type) && (x.chapters.includes(chapter) || x.affectedChapters?.includes(chapter)) || x.type === 'calibrate' && chapter >= x.from)
   if (blocker) throw new Error(`先处理 ${blocker.type}：${blocker.reason}`)
   return report
@@ -407,7 +448,8 @@ export async function finish(root, project, data, taskId = null, report = null) 
     await appendReceipt(root, project.paths.notes, marker, `## 第${pad(chapter)}章 v${version.version}\n\n${data.notes}\n\n出章状态：${JSON.stringify(data.exitState)}`)
     await appendReceipt(root, project.paths.experience, marker, `## 第${pad(chapter)}章 v${version.version}\n\n${data.experience}`)
   }
-  version.receipt = { time: new Date().toISOString(), notes: data.notes, experience: data.experience, contract: await contract(root, project, chapter) }
+  version.receipt = { time: new Date().toISOString(), notes: data.notes, experience: data.experience }
+  version.receipt.contract = await contract(root, project, chapter)
   const lessonId = `E_${chapter}_${version.version}`, oldLesson = project.experiences.find(x => x.id === lessonId)
   const lesson = { id: lessonId, revision: (oldLesson?.revision ?? 0) + 1, status: 'active', from: chapter, to: project.end,
     text: data.experience, source: version.path, history: [] }
@@ -496,7 +538,7 @@ export async function submitReview(root, project, data, taskId = null, { checkOn
     if (kind !== 'final' && !inScope(project, row.chapter)) throw new Error('审阅超出当前授权范围')
     const version = latest(project, row.chapter)
     if (!version || version.version !== row.version || version.path !== row.path || !sameStamp(version.stamp, row.stamp) || !await versionValid(root, version)) throw new Error(`第${pad(row.chapter)}章审阅版本已变化`)
-    if (!same(row.contract, await contract(root, project, row.chapter, { outlineCache }))) throw new Error(`第${pad(row.chapter)}章依据已变化，重建受影响审阅`)
+    if (!sameContract(row.contract, await contract(root, project, row.chapter, { outlineCache }))) throw new Error(`第${pad(row.chapter)}章依据已变化，重建受影响审阅`)
     if (!row.evidence?.length) throw new Error('逐章审阅必须引用实际正文')
     for (const item of row.evidence) {
       if (portable(root, local(root, item.path)) !== version.path) throw new Error('逐章审阅证据必须来自本章当前版本')
@@ -569,6 +611,14 @@ export async function submitReview(root, project, data, taskId = null, { checkOn
   }
   for (const issue of normalizedIssues) project.issues.push({ ...issue, id: `I${project.issues.length + 1}`, revision: 1, status: 'open', review: review.id, history: [] })
   for (const issue of project.issues.filter(x => x.status === 'open')) if (review.chapters.some(row => row.chapter >= issue.from && row.chapter <= issue.to)) issue.reviewedBy = review.id
+  const pendingIssues = openIssues(project).filter(issue => review.chapters.some(row => row.chapter >= issue.from && row.chapter <= issue.to)).map(issue => issue.id)
+  if (pendingIssues.length) review.triage = { status: 'pending', issues: pendingIssues }
+  if (job.microfix) {
+    const fix = project.microfixes.find(row => row.id === job.microfix)
+    if (fix) { fix.status = fix.issues.every(id => !project.issues.some(issue => issue.id === id && issue.status === 'open')) ? 'confirmed' : 'needs-repair';
+      fix.confirmedBy = { review: review.id, task: job.id, agent: job.agent } }
+  }
+
   if (kind === 'final' && data.verdict === 'passed') project.gates[5] = { passed: true, evidence: review.id }
   const path = await managedPath(root, project.paths.reports, `${review.id}.md`)
   await mkdir(dirname(path), { recursive: true })
@@ -577,8 +627,8 @@ export async function submitReview(root, project, data, taskId = null, { checkOn
   await save(root, project)
   return { review, path }
 }
-export async function safeFix(root, project) {
-  const added = await registerFiles(root, project)
+export async function safeFix(root, project, adopted) {
+  const added = await registerFiles(root, project, adopted)
   for (const [name, title] of [[project.paths.notes, '注意事项'], [project.paths.experience, '经验文档']]) {
     if (!existsSync(local(root, name))) {
       const full = await managedPath(root, dirname(local(root, name)), local(root, name))

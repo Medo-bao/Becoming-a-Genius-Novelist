@@ -1,6 +1,39 @@
 # Codex适配
 
-## 2026-10-28 Codex适配核查（版本保持1.0.2）
+## 1.0.3 现稿接手与暂停
+
+- 外部新采用稿与已登记的旧版本撞号时，`doctor --fix --adopted <采用表JSON>` 按 `chapters[章号].file` 核实新稿，将它登记在旧版本之后。缺少明确采用路径的撞号继续报告歧义。
+- 只审范围可直接派独立复核，缺两更列在诊断中。返修范围内，旧问题在遇到更新稿时先核对现稿。跨行补丁按原文唯一锚点匹配 CRLF 和 LF，写入沿用原段换行。
+- 已识别的卷首修改数、条目数和落盘进度数字单独比较，章范围、共规和实际情节仍是复验依据。
+- `scope --mode pause` 使授权进入暂停，并保存已通过预检的独立复核结果供恢复后收件。恢复时重新检查章节范围、稿件版本和证据，符合条件的复核返回 `jobs.kept`。
+- Codex 中断后，`doctor`在`nextAction.jobs[].next`标出待启动、待核验收件、待逐章提交或待核对原生代理状态。确认原代理已停止且没有结果时，`advance <项目> --id <旧任务> --requeue --compact`按当前依据为原岗位和未提交章准备新任务，返回`spawn`。旧单保留在案，已提交章不重复派发。
+
+## 1.0.3 材料范围与依据判定
+
+经验和注意事项的任务副本保留固定条款、最近一轮及当前章直接依赖的记录，同时列出原文行段与被省略的历史段数；完整原文件保留供有依据的回查，不要求每单通读历史日志。
+
+新任务记录细纲中本章、明确依赖和共规的实际文本；同册无关章节、单纯时间戳或工坊进度标记块变化不会使这些新记录整批失效。正文、底本、有效规则及真实依赖变化仍核对。旧记录没有文本快照时继续核对已有文件依据，不自动补造历史阅读证明。
+
+复核的逐章evidence是`[{path,quote}]`对象数组，issues中的evidence是单个对象；所有quote仍须在当前正式稿中逐字连续匹配。Codex仅通过doctor --inspect查看只读状态，不把诊断stage当独立命令。
+
+## 1.0.3 路径、版本状态与收尾
+
+- draft-check与draftFile统一解析绝对路径、项目相对路径和当前章相对路径，小批次仍限定在当前章目录内，避免把项目相对路径再次拼接到任务目录。
+- 出章状态仅在当前稿有两更回执时使用；外部新增版本缺少当前回执时不把旧版状态传给后章，已有正文与历史回执保留。
+- advance自动归档后返回更新的diagnosis、complete交接及归档后的任务路径，不重复要求归档；精简回包同样使用简化后的文档目录。
+- config回包包含实际writeBatchSize。advance的result为收件结果、prepared为新任务、handoff为原生调度要求。
+
+## 1.0.3 流程适配（2026-10-28）
+
+原生版及项目安装版使用同源advance、triage、microfix及chapter-commit入口。advance合并收件、诊断、准备和同批复用绑定，明确返回仍须执行的原生spawn/followup，不把CLI准备完成冒充代理已启动。首次代理只读准备，真实ID绑定后才开始；空闲代理用followup_task唤醒，一个代理同一时间一单，岗位身份独立。
+
+写作默认2—3章，以独立逐章提交保存版本、两更和出章状态后再交下一章材料，不越过复审点。支持单章、stop-after、终点缩小及暂停；原生并发范围变更和逐章落账串行，保存章边界。复核有问题先完成队长triage；明确微修只走专用入口，实质问题交文笔。
+
+原复核在上下文保留、依据未变且完整差异经程序核对时可用advance --context-retained定点确认；失去上下文用task --id ID --reset-context恢复完整材料。保持allow_implicit_invocation:false，源码维护不启动小说制作。
+
+编排方式按[OpenAI Docs子代理说明](https://learn.chatgpt.com/docs/agent-configuration/subagents)核对，明确调用策略按[技能说明](https://learn.chatgpt.com/docs/build-skills)保留；实际原生工具名以当前宿主暴露能力为准。
+
+## 1.0.2 原生代理启动与收件
 
 原生清单、技能路径、明确调用策略及安装启用状态正常；保留受支持的.codex-plugin格式，不新增清单兼容层、后台服务或自动启动钩子。核查并修复以下衔接问题：
 
@@ -15,7 +48,7 @@ DSH的collect内部自动派下一岗属于DSH适配器能力，CLI不能替Code
 
 2026-10-27修复已纳入1.0.2：原生入口优先内置CLI，doctor/context给runtime绝对路径；常用命令加--compact，收件和范围变更直接返回diagnosis.nextAction。全书plan与真实lengthPolicy可直接读取，无关范围外历史异常进入historical诊断，当前章和依赖仍有门禁。明确调用策略保持关闭隐式调用，不以维护插件的请求启动小说制作。
 
-支持原生Codex插件安装，当前版本1.0.2；插件清单位于`.codex-plugin/plugin.json`，本地目录位于`.agents/plugins/marketplace.json`。原生插件载入Codex专用技能和内置CLI，不要求先将技能复制到小说项目。安装只登记插件，不运行doctor、init、import或小说制作。
+支持原生Codex插件安装，当前版本1.0.3；插件清单位于`.codex-plugin/plugin.json`，本地目录位于`.agents/plugins/marketplace.json`。原生插件载入Codex专用技能和内置CLI，不要求先将技能复制到小说项目。安装只登记插件，不运行doctor、init、import或小说制作。
 
 在本地插件包目录注册并安装：
 

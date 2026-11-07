@@ -1,20 +1,23 @@
+import { statSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { inside, safePath } from '../../bin/paths.mjs'
-import { requiredInputs, assertReadReceipt } from '../../bin/tasks.mjs'
+import { requiredInputs, assertReadReceipt, currentChapter, taskInfo } from '../../bin/tasks.mjs'
 
 export const DSH_RUNTIME = 'dsh-worker-v1'
 const readings = new WeakMap()
+const fileStamp = path => { try { const value = statSync(path); return `${value.size}:${value.mtimeMs}` } catch { return null } }
 const key = path => process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path)
 
 export function observeReading(exec, result) {
   const session = exec.agent?.session, value = result.value
   if (!session || result.isError || typeof value?.path !== 'string' || !Array.isArray(value.lines) || !Number.isSafeInteger(value.totalLines)) return
   let state = readings.get(session)
-  if (!state) readings.set(session, state = { files: new Map(), jobs: new Map(), receipted: new Set() })
+  if (!state) readings.set(session, state = { files: new Map(), jobs: new Map(), receipted: new Set(), retained: true })
   const path = key(value.path)
   let file = state.files.get(path)
-  if (!file || file.total !== value.totalLines) state.files.set(path, file = { total: value.totalLines, seen: new Set() })
+  const stamp = fileStamp(value.path)
+  if (!file || file.total !== value.totalLines || file.stamp !== stamp) state.files.set(path, file = { total: value.totalLines, stamp, seen: new Set() })
   for (const line of value.lines) if (Number.isSafeInteger(line.number) && line.number > 0 && line.number <= file.total &&
     typeof line.text === 'string' && !line.text.includes('... (line truncated to ')) file.seen.add(line.number)
 }
@@ -25,11 +28,11 @@ async function requiredFiles(root, job) {
 
 export async function assertMaterialsRead(exec, root, job, hostPath, { measure = false } = {}) {
   if (job.runtime !== DSH_RUNTIME) return
-  const directory = await safePath(root, job.directory)
+  const directory = await safePath(root, job.currentDirectory ?? job.directory)
   const state = readings.get(exec.agent.session)
-  const correcting = job.role === '复核' && job.resultCorrection?.pending === true
+  const correcting = job.role === '复核' && job.resultCorrection?.pending === true && state?.retained !== false && state?.receipted.has(job.id)
   if (correcting) await assertReadReceipt(root, job)
-  const cacheId = correcting ? `${job.id}:correction:${job.resultCorrection.attempts}` : job.id
+  const cacheId = correcting ? `${job.id}:correction:${job.resultCorrection.attempts}` : `${job.id}:${job.scopeRevision}:${job.batch ? job.cursor : 0}:${job.deltaReview ? 'delta' : 'full'}`
   let required = state?.jobs.get(cacheId)
   if (!required) {
     required = await requiredFiles(root, job)
@@ -45,17 +48,28 @@ export async function assertMaterialsRead(exec, root, job, hostPath, { measure =
   for (const item of required) {
     const file = state.files.get(key(item.path))
     const expected = item.lines ?? file?.total
-    if (!file || expected === undefined || file.seen.size < expected) {
+    if (!file || expected === undefined || file.seen.size < expected || (!(correcting && key(item.path) === key(resolve(directory, 'result.json'))) && file.stamp !== fileStamp(item.path))) {
       let offset = 1
       while (file?.seen.has(offset)) offset++
       missing.push(`${item.path}：用read从第${offset}行继续分页`)
     }
   }
   if (missing.length) throw new Error(`尚未完整读取以下${missing.length}份材料；一次列出全部缺项，读完后再提交：\n${missing.join('\n')}`)
-  if (correcting || measure || key(hostPath) !== key(resolve(directory, 'result.json')) || state.receipted.has(job.id)) return
+  if (correcting || measure || key(hostPath) !== key(resolve(directory, 'result.json')) || state.receipted.has(`${job.id}:${job.scopeRevision}:${job.cursor ?? 0}`)) return
   const path = await safePath(root, `.novel-workshop/read-receipts/${job.id}.json`)
   await mkdir(dirname(path), { recursive: true })
-  await writeFile(path, JSON.stringify({ task: job.id, agent: job.agent, scopeRevision: job.scopeRevision, complete: true,
+  await writeFile(path, JSON.stringify({ task: job.id, agent: job.agent, scopeRevision: job.scopeRevision, chapter: currentChapter(job), complete: true,
     files: required.map(item => ({ path: item.path, lines: item.lines ?? state.files.get(key(item.path)).total })), time: new Date().toISOString() }) + '\n', 'utf8')
-  state.receipted.add(job.id)
+  state.receipted.add(job.id); state.receipted.add(`${job.id}:${job.scopeRevision}:${job.cursor ?? 0}`); state.retained = true
+}
+
+export function forgetReadings(session) { readings.delete(session) }
+export async function hasRetainedReadings(session, root, job) {
+  const state = readings.get(session)
+  if (!state || !state.receipted.has(job.id)) return false
+  for (const item of await requiredInputs(root, job)) {
+    const file = state.files.get(key(item.path)), total = item.lines ?? file?.total, stamp = fileStamp(item.path)
+    if (!file || total === undefined || file.seen.size < total || stamp === null || file.stamp !== stamp) return false
+  }
+  return true
 }

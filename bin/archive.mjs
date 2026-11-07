@@ -19,7 +19,7 @@ function protectedPaths(root, project) {
   for (const value of [project.paths.notes, project.paths.experience, project.source?.path, project.metadata.cover,
     ...Object.values(project.documents ?? {}).map(item => item.path), ...(project.outlines ?? []).map(item => item.path), ...(project.progressFiles ?? []),
     '01-设想.md', '01-世界.md', '02-人设', '02-世界', '03-大纲.md', '04-文风.md', '05-总纲要.md',
-    '00-状态.md', 'AGENTS.md', 'AGENTS.override.md', 'AGENTS.local.md', 'CLAUDE.md', '.git', '.agents', '.codex',
+    '00-状态.md', 'AGENTS.md', 'AGENTS.override.md', 'AGENTS.local.md', 'CLAUDE.md', '.git', '.agents', '.codex', '.zcode',
     '.novel-workshop/project.json', '.novel-workshop/core', '.novel-workshop/bin', '.novel-workshop/archive',
     '.novel-workshop/当前要求.md', '.novel-workshop/参数与派单.md']) add(value)
   for (const row of Object.values(project.chapters)) {
@@ -85,7 +85,7 @@ async function plan(root, project, directory) {
     const path = resolve(root, material.path)
     await add(path, category, `${folders[category]}/${P.portable(root, path)}`)
   }
-  for (const [path, category] of [['drafts', 'drafts'], ['review-drafts', 'reviews'], ['read-receipts', 'receipts']]) {
+  for (const [path, category] of [['drafts', 'drafts'], ['review-drafts', 'reviews'], ['read-receipts', 'receipts'], ['batches', 'temporary']]) {
     await children(resolve(root, '.novel-workshop', path), name => add(resolve(root, '.novel-workshop', path, name), category, `${folders[category]}/${name}`))
   }
   return { entries, kept }
@@ -110,7 +110,7 @@ function rewrite(value, mapPath, field = '', inlinePointers = false) {
 async function metadataUpdates(root, entries, mapPath) {
   const updates = []
   for (const entry of entries) for (const file of entry.files) {
-    const prompt = entry.category === 'tasks' && key(file) === key(resolve(entry.from, 'prompt.md'))
+    const prompt = entry.category === 'tasks' && basename(file) === 'prompt.md'
     if (!file.endsWith('.json') && !prompt) continue
     const before = await readFile(file)
     let text

@@ -1,5 +1,6 @@
 node_modules/
 .novel-workshop/
+.zcode/
 .agents/*
 !.agents/plugins/
 .agents/plugins/*

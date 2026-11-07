@@ -8,6 +8,8 @@ import * as W from './production.mjs'
 import * as T from './tasks.mjs'
 import * as D from './documents.mjs'
 import * as A from './archive.mjs'
+import * as F from './workflow.mjs'
+import { withProjectTransaction } from './transaction.mjs'
 import { runtime } from './runtime.mjs'
 import { bookFormats } from './book-formats.mjs'
 import { safePath, managedPath } from './paths.mjs'
@@ -38,7 +40,7 @@ function range(project, flags) {
 }
 async function initialize(root, flags) {
   if (existsSync(P.local(root, P.MANIFEST))) throw new Error('已有项目登记，不能重复初始化；使用 config 或 import 新项目')
-  const allowed = new Set(['.agents', '.codex', '.novel-workshop', 'AGENTS.md', 'AGENTS.override.md', '.git', '.gitignore', '.gitattributes'])
+  const allowed = new Set(['.agents', '.codex', '.zcode', '.novel-workshop', 'AGENTS.md', 'AGENTS.override.md', '.git', '.gitignore', '.gitattributes'])
   if (existsSync(root) && (await readdir(root)).some(name => !allowed.has(name))) throw new Error('目录已有小说或其他文件，请用 import 接手，不覆盖内容')
   const start = P.integer(flags.start ?? 1), count = P.integer(flags.chapters ?? 120, '计划位置数', 1)
   const project = P.templateProject(root, { title: flags.title, mode: flags.mode === '改编' ? '改编精修' : flags.mode,
@@ -127,7 +129,8 @@ async function setScope(root, project, flags) {
     P.confirmParameters(project, ['interval'], flags.source)
   }
   const jobs = await T.updateScopeJobs(root, project, previous, previousInterval)
-  project.checkpoint = { time: new Date().toISOString(), scopeRevision: project.scope.revision, nextAction: 'doctor' }
+  const resumePoint = mode === 'pause' || previous.mode === 'pause' && previous.revision > 0 ? project.checkpoint : null
+  project.checkpoint = { ...resumePoint, time: new Date().toISOString(), scopeRevision: project.scope.revision, nextAction: mode === 'pause' ? 'paused' : 'doctor' }
   await P.save(root, project)
   return { ...project.scope, jobs }
 }
@@ -148,7 +151,7 @@ async function mapChapter(root, project, data) {
   return project.chapters[chapter]
 }
 async function configure(root, project, data) {
-  const allowed = ['mode', 'plan', 'words', 'interval', 'length', 'maxRepairRounds', 'metadata', 'documents', 'outlines', 'progressFiles', 'autoArchive', 'source']
+  const allowed = ['mode', 'plan', 'words', 'interval', 'length', 'maxRepairRounds', 'metadata', 'documents', 'outlines', 'progressFiles', 'autoArchive', 'writeBatchSize', 'source']
   for (const key of Object.keys(data)) if (!allowed.includes(key)) throw new Error(`config不支持${key}；使用mode、plan.start/end、length对象、interval及source`)
   if (data.length !== undefined && (!data.length || typeof data.length !== 'object' || Array.isArray(data.length))) throw new Error('length需要对象，例如{"type":"source","minRatio":null,"maxRatio":null}；不得传篇幅说明字符串')
   if (data.documents !== undefined) await D.bind(root, project, data.documents, data.source)
@@ -177,6 +180,10 @@ async function configure(root, project, data) {
   }
   if (data.words !== undefined) project.words = P.integer(data.words, '章均字数', 1)
   if (data.interval !== undefined) { project.interval = P.integer(data.interval, '验收间隔', 1); keys.push('interval') }
+  if (data.writeBatchSize !== undefined) {
+    project.writeBatchSize = P.integer(data.writeBatchSize, '写作批次大小', 1)
+    if (project.writeBatchSize > 3) throw new Error('writeBatchSize只支持1—3；不改变复审间隔')
+  }
   if (data.maxRepairRounds !== undefined) project.maxRepairRounds = P.integer(data.maxRepairRounds, '熔断轮数', 1)
   if (data.metadata) project.metadata = { ...project.metadata, ...data.metadata }
   if (data.length) {
@@ -196,7 +203,7 @@ async function configure(root, project, data) {
     for (const job of project.jobs) if (['pending', 'running'].includes(job.status)) { job.status = 'cancelled'; job.reason = '制作参数已更新，保留结果后根据新材料重新派单' }
   }
   await P.save(root, project)
-  return { words: project.words, interval: project.interval, maxRepairRounds: project.maxRepairRounds, length: project.length, metadata: project.metadata,
+  return { words: project.words, interval: project.interval, writeBatchSize: project.writeBatchSize, maxRepairRounds: project.maxRepairRounds, length: project.length, metadata: project.metadata,
     documents: project.documents, outlines: project.outlines ?? [], progressFiles: project.progressFiles ?? [], autoArchive: project.autoArchive, missingParameters: P.missingParameters(project) }
 }
 async function merge(root, project, flags) {
@@ -266,13 +273,18 @@ async function execute(argv, payload) {
 novel <命令> <项目目录> [选项]
   init       新书 --title --mode --start --chapters|--end --words --length fixed|source --interval
   import     接手既有目录 --body --baseline <底本> --encoding --start --end
-  doctor     自动诊断、缺失参数、已有任务与下一步 --json [--compact] [--fix|--inspect]
+  doctor     自动诊断、缺失参数、已有任务与下一步 --json [--compact] [--fix [--adopted 采用表JSON]|--inspect]
   documents  查找现有文档用途、标题与目录 --kind characters|style|... --query 关键词 [--offset N --limit N]
   status     进度与有效授权
   config     --source JSON；或 --source 用户依据 --mode --start --end --length --words --interval
   scope      --mode continue|review|revise|pause|export --from --to --source 用户指示 [--deliver] [--revise-approved]
   dispatch   六岗建单 --role 主编|世界|剧情|人物|文笔|复核 --action 动作 [--chapter N|--chapters 1,2|--from N --to N]
-  task       查询任务；--id ID --status running --agent 实际子代理ID；failed|cancelled 需要 --reason
+  task       查询任务；--id ID --status running --agent 实际子代理ID [--runtime codex-native-v1|zcode-native-v1，省略按codex]；failed|cancelled 需要 --reason
+  advance    [--id ID] [--reuse|--agent 实际ID] [--context-retained] [--runtime 同上]；收件、诊断、准备及复用绑定合并，仍须原生启动
+             --id ID --requeue；确认原执行者已停止且未交结果后重派（原生运行时通用）
+  triage     --source 分流JSON；队长逐项判定处置，不直接改写原报告
+  microfix   --source 微修JSON；专用受限补丁，字词须原复核确认
+  chapter-commit --task ID --file 当前结果 [--stop-after]；小批次逐章提交
   collect    --id ID；收集子代理 result.json 并串行提交，队长不代写
   draft-check 文笔交稿前精确计量 --task ID --file 任务草稿或result.json（含patches）
   result-check 原复核结果只读预检 --task ID；不提交、不改判决或正文
@@ -295,6 +307,7 @@ novel <命令> <项目目录> [选项]
   if (!argument) throw new Error('缺少项目目录')
   const root = resolve(argument)
   if (command === 'doctor' && flags.inspect === true && flags.fix === true) throw new Error('doctor --inspect只读，不能同时使用--fix')
+  if (command === 'doctor' && flags.adopted !== undefined && (flags.fix !== true || typeof flags.adopted !== 'string')) throw new Error('--adopted 需要 doctor --fix 和采用表JSON路径')
   if (command === 'documents') {
     const project = existsSync(P.local(root, P.MANIFEST)) ? await P.load(root) : null
     const found = await D.inventory(root, project), offset = P.integer(flags.offset ?? 0, '文档偏移'), limit = P.integer(flags.limit ?? 10, '文档页长', 1)
@@ -310,7 +323,13 @@ novel <命令> <项目目录> [选项]
   const project = await P.load(root)
   switch (command) {
     case 'doctor': {
-      const repair = flags.fix ? await W.safeFix(root, project) : null
+      let adopted
+      if (flags.adopted !== undefined) {
+        const ledger = await P.jsonFile(P.local(root, flags.adopted))
+        if (!ledger?.chapters || typeof ledger.chapters !== 'object' || Array.isArray(ledger.chapters)) throw new Error('采用表需要 chapters 对象，各章以 file 指向实际采用正文')
+        adopted = ledger.chapters
+      }
+      const repair = flags.fix ? await W.safeFix(root, project, adopted) : null
       const report = await W.diagnose(root, project)
       return flags.inspect === true ? W.inspectReport(report) : { ...report, ...(repair ? { repair } : {}) }
     }
@@ -344,10 +363,15 @@ novel <命令> <项目目录> [选项]
       if (!flags.status) {
         const job = project.jobs.find(x => x.id === flags.id)
         if (!job) throw new Error('任务单不存在')
+        if (flags['reset-context'] === true) { job.deltaReview = false; await T.prepareTask(root, project, job); await P.save(root, project) }
         return T.taskInfo(root, job)
       }
       return await T.updateTask(root, project, flags)
     case 'collect': return await T.collect(root, project, flags.id)
+    case 'advance': return await F.advance(root, project, { id: flags.id, agent: flags.agent, reuse: flags.reuse === true, contextRetained: flags['context-retained'] === true, requeue: flags.requeue, runtime: flags.runtime })
+    case 'triage': return await F.triage(root, project, await readPayload(flags))
+    case 'microfix': return await F.microfix(root, project, await readPayload(flags))
+    case 'chapter-commit': return await T.commitChapter(root, project, { task: flags.task ?? flags.id, file: flags.file, stopAfter: flags['stop-after'] === true })
     case 'draft-check': return await T.inspectDraft(root, project, flags)
     case 'result-check': return await T.inspectResult(root, project, flags.task ?? flags.id)
     case 'write':
@@ -375,7 +399,7 @@ novel <命令> <项目目录> [选项]
 async function runManaged(argv, payload) {
   const result = await execute(argv, payload)
   const { positional: [command, argument], flags } = args(argv)
-  const completion = ['collect', 'review', 'merge', 'finish', 'record', 'checkpoint', 'scope', 'config', 'calibrate', 'gate'].includes(command) ||
+  const completion = ['collect', 'advance', 'triage', 'microfix', 'chapter-commit', 'review', 'merge', 'finish', 'record', 'checkpoint', 'scope', 'config', 'calibrate', 'gate'].includes(command) ||
     command === 'task' && flags.status || command === 'doctor' && flags.fix === true
   if (!completion || !argument || flags.inspect === true) return result
   const root = resolve(argument), project = await P.load(root)
@@ -391,6 +415,12 @@ async function runManaged(argv, payload) {
   const report = await W.diagnose(root, project)
   if (!['complete', 'archive'].includes(report.stage) || project.jobs.some(job => ['pending', 'running'].includes(job.status))) return result
   const archived = await A.archive(root, project, { report })
+  if (command === 'advance') {
+    const diagnosis = await W.diagnose(root, project), next = diagnosis.nextAction
+    const collected = project.jobs.find(job => job.id === result.result?.id)
+    return { ...result, ...(collected ? { result: T.publicTask(T.taskInfo(root, collected)) } : {}), diagnosis,
+      handoff: { type: next.type, call: next.call ?? null }, archive: archived }
+  }
   if (result?.id?.startsWith('job-')) {
     const job = project.jobs.find(item => item.id === result.id)
     return { ...result, ...T.taskInfo(root, job), ...(job.output ? { output: job.output } : {}), archive: archived }
@@ -405,24 +435,29 @@ function compactDiagnosis(report) {
     counts: { tasks: report.tasks?.length ?? 0, diagnostics: report.diagnostics?.length ?? 0, taskTypes: counts(report.tasks), diagnosticTypes: counts(report.diagnostics) },
     ...(report.documents ? { documents: Object.fromEntries(Object.entries(report.documents).map(([name, item]) => [name, { path: item.path, status: item.status, candidateCount: item.candidateCount }])) } : {}) }
 }
-export async function run(argv, payload) {
-  const result = await runManaged(argv, payload)
+export async function run(argv, payload, execution = {}) {
   const { positional: [command, argument], flags } = args(argv)
+  const mutation = ['init', 'import', 'config', 'scope', 'source', 'gate', 'map', 'record', 'write', 'finish', 'review', 'calibrate', 'checkpoint', 'merge', 'dispatch', 'collect', 'advance', 'triage', 'microfix', 'chapter-commit'].includes(command) ||
+    command === 'doctor' && flags.fix || command === 'task' && (flags.status || flags['reset-context']) || command === 'archive' && !flags.preview
+  const result = mutation && argument && execution.transactionRoot !== resolve(argument)
+    ? await withProjectTransaction(resolve(argument), () => runManaged(argv, payload)) : await runManaged(argv, payload)
   if (!result || typeof result !== 'object' || Array.isArray(result)) return result
   if (!flags.compact) return command === 'doctor' ? { ...result, runtime } : result
   if (['doctor', 'status'].includes(command)) return { ...compactDiagnosis(result), runtime }
   if (command === 'check') return { ...result, runtime }
   let value = result
+  if (command === 'advance') value = { ...result, diagnosis: compactDiagnosis(result.diagnosis) }
+  if (command === 'chapter-commit') value = { ...result, task: T.publicTask(result.task) }
   if (result.id?.startsWith('job-')) {
-    const { id, role, action, chapters, scopeRevision, status, agent, directory, promptPath, contextPath, resultPath, archivedIn, archive, output } = result
+    const { id, role, action, chapters, scopeRevision, status, agent, directory, promptPath, contextPath, resultPath, archivedIn, archive, replacedBy, output } = result
     const summary = output?.review ? { path: output.path, review: { id: output.review.id, verdict: output.review.verdict,
       summary: output.review.summary, chapters: output.review.chapters.map(row => ({ chapter: row.chapter, version: row.version, verdict: P.rowVerdict(output.review, row) })),
       issues: output.review.issues?.length ?? 0, resolutions: output.review.resolutions?.length ?? 0 } } : output ? {
       path: output.path, version: output.version, words: output.words, files: output.files, receipt: Boolean(output.receipt || output.receipts?.length),
       ...(output.receipts ? { registeredChapters: output.receipts.map(row => row.chapter) } : {}) } : undefined
-    value = { id, role, action, chapters, scopeRevision, status, agent, directory, promptPath, contextPath, resultPath, archivedIn, archive, ...(summary ? { output: summary } : {}) }
+    value = { id, role, action, chapters, scopeRevision, status, agent, directory, promptPath, contextPath, resultPath, archivedIn, archive, replacedBy, ...(summary ? { output: summary } : {}) }
   }
-  const diagnose = ['collect', 'scope', 'config'].includes(command) || command === 'task' && flags.status
+  const diagnose = ['collect', 'triage', 'microfix', 'scope', 'config'].includes(command) || command === 'task' && flags.status
   return { ...value, runtime, ...(diagnose ? { diagnosis: compactDiagnosis(await W.diagnose(resolve(argument), await P.load(resolve(argument)))) } : {}) }
 }
 if (process.argv[1] && existsSync(process.argv[1]) && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {

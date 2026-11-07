@@ -9,11 +9,13 @@
  * 做的事：
  *   1. 复制 core/ 与全部运行模块到 <项目>/.novel-workshop/
  *   2. 把 adapters/<宿主>/AGENTS.md 追加到 <项目>/AGENTS.md（带标记，可重复执行）
- *   3. target=codex 时安装项目级 .agents/skills/tiancai-novel/；ZCode 入口保留待后续适配。
+ *   3. target=codex 时安装项目级 .agents/skills/tiancai-novel/；target=zcode 时安装
+ *      项目级 .zcode/skills/tiancai-novel/，两者均改写 SKILL.md 内部链接；清理用户级残留前
+ *      先校验 SKILL.md 含本工坊特征，非本工坊安装的同名目录不动。
  */
 
 import { existsSync } from 'node:fs'
-import { copyFile, cp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { copyFile, cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -21,7 +23,6 @@ import { fileURLToPath } from 'node:url'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO = resolve(HERE, '..')
 const CORE = join(REPO, 'core')
-const SKILL = join(REPO, 'skills', 'tiancai-novel')
 
 const MARK_BEGIN = '<!-- tiancai-novel:begin -->'
 const MARK_END = '<!-- tiancai-novel:end -->'
@@ -81,18 +82,10 @@ async function writeAgentsFile(projectDir, target) {
   return file
 }
 
-async function installSkill() {
-  const zcodeHome = process.env.ZCODE_HOME?.trim() || join(homedir(), '.zcode')
-  const dest = join(zcodeHome, 'skills', 'tiancai-novel')
+/** 复制宿主通用技能目录，并把包内相对链接改写为本项目 .novel-workshop 位置。 */
+async function installSkillFrom(host, dest) {
   await mkdir(dest, { recursive: true })
-  await cp(SKILL, dest, { recursive: true, force: true })
-  return dest
-}
-
-async function installCodexSkill(projectDir) {
-  const dest = join(projectDir, '.agents', 'skills', 'tiancai-novel')
-  await mkdir(dest, { recursive: true })
-  await cp(join(REPO, 'adapters', 'codex', 'skills', 'tiancai-novel'), dest, { recursive: true, force: true })
+  await cp(join(REPO, 'adapters', host, 'skills', 'tiancai-novel'), dest, { recursive: true, force: true })
   const entry = join(dest, 'SKILL.md')
   const content = (await readFile(entry, 'utf8'))
     .replaceAll('](../../../../core/', '](../../../.novel-workshop/core/')
@@ -100,6 +93,26 @@ async function installCodexSkill(projectDir) {
   await writeFile(entry, content, 'utf8')
   return dest
 }
+
+async function installZcodeSkill(projectDir) {
+  const notes = []
+  const zcodeHome = process.env.ZCODE_HOME?.trim() || join(homedir(), '.zcode')
+  const stale = join(zcodeHome, 'skills', 'tiancai-novel')
+  if (existsSync(stale)) {
+    const entry = join(stale, 'SKILL.md')
+    const content = existsSync(entry) ? await readFile(entry, 'utf8').catch(() => '') : ''
+    const ours = content.includes('name: tiancai-novel') && content.includes('novel.mjs') && content.includes('手册.md')
+    if (ours) {
+      await rm(stale, { recursive: true, force: true })
+      notes.push(`已清理旧的用户级技能残留：${stale}（避免遮蔽项目级同名技能）`)
+    } else {
+      notes.push(`用户级存在同名技能但不含本工坊特征，未删除：${stale}（如确认是残留请手动处理）`)
+    }
+  }
+  return { dest: await installSkillFrom('zcode', join(projectDir, '.zcode', 'skills', 'tiancai-novel')), notes }
+}
+
+const installCodexSkill = projectDir => installSkillFrom('codex', join(projectDir, '.agents', 'skills', 'tiancai-novel'))
 
 async function main() {
   const flags = parseArgv(process.argv.slice(2))
@@ -139,8 +152,8 @@ async function main() {
   ]
 
   if (target === 'zcode' && flags['no-skill'] !== true) {
-    const skillDir = await installSkill()
-    lines.push(`技能：${skillDir}`)
+    const { dest, notes } = await installZcodeSkill(projectDir)
+    lines.push(`项目技能：${dest}`, ...notes)
   }
 
   if (target === 'codex' && flags['no-skill'] !== true) {
@@ -149,7 +162,7 @@ async function main() {
 
   lines.push('', target === 'codex'
     ? '安装完成，尚未启动小说流程。仅在明确使用 $tiancai-novel 或点选本插件时运行；普通写小说请求不主动调用。若新技能尚未显示，在该项目新开聊天。'
-    : '下一步：给智能体发一句「按 AGENTS.md 检查项目」；ZCode 专门适配仍待后续。')
+    : '安装完成，尚未启动小说流程。仅在明确调用 tiancai-novel 技能或点选本插件时运行；普通写小说请求不主动调用。若新技能尚未显示，在该项目新开聊天。')
   process.stdout.write(lines.join('\n') + '\n')
 }
 
