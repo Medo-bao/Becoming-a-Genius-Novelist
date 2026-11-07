@@ -98,7 +98,7 @@ CLI不调用外部模型；DSH或Codex的原生子代理执行创作和语义判
 
 权威状态为 `.novel-workshop/project.json`，人类可读状态和当前要求摘要自动生成。程序位于 `bin/`，共用流程位于 `core/`，宿主入口位于 `adapters/`。
 
-详见[使用说明](docs/使用说明.md)、[Codex适配](docs/Codex适配.md)、[ZCode适配](docs/ZCode适配.md)、[派单协议](core/派单.md)、[自动制作协议](core/自动制作.md)、[1.0.0发布说明](docs/1.0.0发布说明.md)、[迭代记录](docs/迭代记录.md)。
+详见[使用说明](docs/使用说明.md)、[Codex适配](docs/Codex适配.md)、[ZCode适配](docs/ZCode适配.md)、[派单协议](core/派单.md)、[自动制作协议](core/自动制作.md)和[更新日志](CHANGELOG.md)。
 
 ## 许可
 

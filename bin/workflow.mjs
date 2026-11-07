@@ -144,15 +144,24 @@ export async function advance(root, project, data = {}) {
     const old = project.jobs.find(job => job.id === data.id)
     result = ['failed', 'cancelled'].includes(old?.status) && old.committed?.length ? T.taskInfo(root, old) : await T.collect(root, project, data.id)
   }
-  const diagnosis = await W.diagnose(root, project), next = diagnosis.nextAction
-  if (!queued && (next.requiresUser || next.call?.action !== 'dispatch')) return { result: T.publicTask(result), diagnosis, handoff: { type: next.type, call: next.call ?? null } }
-  const job = queued ?? await T.dispatch(root, project, next.call.options)
-  const current = project.jobs.find(row => row.id === job.id)
-  const agent = data.agent ?? (data.reuse ? reusableAgent(project, current, host) : null)
-  if (agent && !current.agent) { current.runtime = host; await T.updateTask(root, project, { id: current.id, status: 'running', agent }) }
-  if (data.contextRetained) await T.useMicroDelta(root, project, current, { contextRetained: true })
-  const info = T.taskInfo(root, current)
-  return { result: T.publicTask(result), diagnosis, prepared: T.publicTask(info), handoff: { type: current.agent ? 'followup' : 'spawn', agent: current.agent,
-    nativeCallRequired: true, promptPath: info.promptPath, contextPath: info.contextPath, resultPath: info.resultPath,
-    instruction: current.agent ? '本单已绑定同岗位代理；用宿主原生唤醒调用实际启动执行，不把仅追加消息当启动。' : '先原生spawn只读准备，取得真实ID后task绑定，再用宿主原生唤醒调用确认开始。' } }
+  let prepared = queued
+  try {
+    const diagnosis = await W.diagnose(root, project), next = diagnosis.nextAction
+    if (!prepared && (next.requiresUser || next.call?.action !== 'dispatch')) return { result: T.publicTask(result), diagnosis, handoff: { type: next.type, call: next.call ?? null } }
+    prepared ??= await T.dispatch(root, project, next.call.options)
+    const current = project.jobs.find(row => row.id === prepared.id)
+    const agent = data.agent ?? (data.reuse ? reusableAgent(project, current, host) : null)
+    if (agent && !current.agent) { current.runtime = host; await T.updateTask(root, project, { id: current.id, status: 'running', agent }) }
+    if (data.contextRetained) await T.useMicroDelta(root, project, current, { contextRetained: true })
+    const info = T.taskInfo(root, current)
+    return { result: T.publicTask(result), diagnosis, prepared: T.publicTask(info), handoff: { type: current.agent ? 'followup' : 'spawn', agent: current.agent,
+      nativeCallRequired: true, promptPath: info.promptPath, contextPath: info.contextPath, resultPath: info.resultPath,
+      instruction: current.agent ? '本单已绑定同岗位代理；用宿主原生唤醒调用实际启动执行，不把仅追加消息当启动。' : '先原生spawn只读准备，取得真实ID后task绑定，再用宿主原生唤醒调用确认开始。' } }
+  } catch (error) {
+    const saved = []
+    if (result?.status === 'completed') saved.push(`任务 ${result.id} 已收件`)
+    if (prepared) saved.push(`任务 ${prepared.id} 已准备`)
+    if (!saved.length) throw error
+    throw new Error(`${saved.join('，')}。后续步骤失败：${error.message}。可运行 doctor 查看当前状态`, { cause: error })
+  }
 }

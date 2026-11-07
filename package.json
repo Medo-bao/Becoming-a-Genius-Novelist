@@ -4,9 +4,9 @@
   "private": true,
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Medo-bao/-.git"
+    "url": "git+https://github.com/Medo-bao/Becoming-a-Genius-Novelist.git"
   },
-  "homepage": "https://github.com/Medo-bao/-#readme",
+  "homepage": "https://github.com/Medo-bao/Becoming-a-Genius-Novelist#readme",
   "type": "module",
   "engines": {
     "node": ">=18"
