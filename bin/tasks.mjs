@@ -356,9 +356,9 @@ export async function dispatch(root, project, data, { replaces, replacementReaso
   return taskInfo(root, job)
 }
 
-export async function requeueInterrupted(root, project, id) {
+export async function requeueInterrupted(root, project, id, allowedRuntimes = nativeRuntimes) {
   const job = project.jobs.find(row => row.id === id)
-  if (!job || !nativeRuntimes.includes(job.runtime) || project.scope.mode === 'pause' || job.scopeRevision !== project.scope.revision) {
+  if (!job || !allowedRuntimes.includes(job.runtime) || project.scope.mode === 'pause' || job.scopeRevision !== project.scope.revision) {
     throw new Error('重派需要当前授权下已绑定的原生子代理任务')
   }
   if (job.replacedBy) {

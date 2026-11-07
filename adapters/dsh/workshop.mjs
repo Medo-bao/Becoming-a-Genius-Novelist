@@ -54,7 +54,7 @@ const specs = {
   dispatch: { options: object({ role: choice(['主编', '世界', '人物', '剧情', '文笔', '复核']),
     action: choice(['plan', 'capture-requirements', 'decision', 'facts', 'outline', 'map-source', 'calibrate', 'write', 'repair', 'repair-length', 'repair-format', 'finish', 'review', 'final-review']),
     chapter: number, chapters: list, ...span, microfix: string, issueIds: { type: 'array', items: string }, review: { type: 'string', description: '仅calibrate对应的已登记审阅ID，不是额外提示词' } }, ['role', 'action']), required: ['options'] },
-  advance: { options: object({ id: string }) },
+  advance: { options: object({ id: string, requeue: { type: 'boolean', description: '确认原执行者已停止且结果缺失或JSON损坏后，带原任务ID重派未提交部分' } }) },
   triage: { data: object({ review: string, decisions: { type: 'array', items: object({ id: string, route: choice(['ignore', 'micro', 'repair', 'plan', 'clarify', 'author']), kind: choice(['format', 'punctuation', 'typo']), reason: string }, ['id', 'route', 'reason']) } }, ['review', 'decisions']), required: ['data'] },
   microfix: { data: object({ issue: string, issues: { type: 'array', items: string }, version: number,
     format: object({ heading: choice(['plain', 'markdown']), indent: choice(['none', 'fullwidth']) }),
@@ -196,22 +196,35 @@ export function registerWorkshop(ctx) {
         const job = (await P.load(root)).jobs.find(job => job.id === flags.id)
         if (job?.resultCorrection?.pending) throw new Error('原复核代理正在回修结果，先等完成通知后collect；作者取消时用scope pause或明确cancelled，不把字段回修冒充执行失败')
       }
-      if (args.action === 'advance') {
+      const requeue = args.action === 'advance' && flags.requeue === true
+      if (args.action === 'advance' && !requeue) {
         if (flags.id) return definition.execute({ action: 'collect', project: root, options: { id: flags.id } }, exec)
         const diagnosis = await W.diagnose(root, await P.load(root))
         if (!diagnosis.nextAction.requiresUser && diagnosis.nextAction.call?.action === 'dispatch') return definition.execute({ ...diagnosis.nextAction.call, project: root }, exec)
         return jsonValue({ diagnosis, instruction: '按当前nextAction处理队长分流、微修或真实阻塞；没有启动岗位。' })
       }
-      if (args.action === 'dispatch') {
+      if (args.action === 'dispatch' || requeue) {
         const project = await P.load(root)
-        let job = await T.dispatch(root, project, { ...flags, chapters: flags.chapters === undefined ? undefined : String(flags.chapters).split(',') })
-        if (job.status === 'running' && job.runtime === DSH_RUNTIME) return jsonValue({ result: publicResult(job), waiting: true, instruction: '该任务已启动，等完成通知后collect，不重复派单或轮询' })
-        if (job.agent) {
-          await T.updateTask(root, project, { id: job.id, status: 'cancelled', reason: '旧宿主任务未通过当前DSH派单入口，保留产物后重新派发' })
-          job = await T.dispatch(root, project, { ...flags, chapters: flags.chapters === undefined ? undefined : String(flags.chapters).split(',') })
+        let job
+        if (requeue) {
+          if (exec.signal?.aborted) throw new Error('当前操作已中止，不重派任务')
+          const old = project.jobs.find(item => item.id === flags.id)
+          if (old?.runtime !== DSH_RUNTIME || !old.agent) throw new Error('重派需要已绑定DSH执行者的原任务ID')
+          if (ctx.agents.get(old.agent)?.status === 'running' || [...runs.values()].some(run => run.root === root && run.jobId === old.id)) {
+            throw new Error('原DSH执行者仍在运行，等完成或确认中断后再处理')
+          }
+          job = await T.requeueInterrupted(root, project, old.id, [DSH_RUNTIME])
+        } else {
+          const dispatchFlags = { ...flags, chapters: flags.chapters === undefined ? undefined : String(flags.chapters).split(',') }
+          job = await T.dispatch(root, project, dispatchFlags)
+          if (job.status === 'running' && job.runtime === DSH_RUNTIME) return jsonValue({ result: publicResult(job), waiting: true, instruction: '该任务已启动，等完成通知后collect，不重复派单或轮询' })
+          if (job.agent) {
+            await T.updateTask(root, project, { id: job.id, status: 'cancelled', reason: '旧宿主任务未通过当前DSH派单入口，保留产物后重新派发' })
+            job = await T.dispatch(root, project, dispatchFlags)
+          }
         }
         const current = project.jobs.find(item => item.id === job.id)
-        const candidate = F.reusableAgent(project, current, DSH_RUNTIME)
+        const candidate = requeue ? null : F.reusableAgent(project, current, DSH_RUNTIME)
         const previous = candidate && ctx.agents.get(candidate)
         const reused = previous?.session?.header?.parentSession === parent.session.header.id ? previous : null
         const childId = reused ? candidate : randomUUID()
